@@ -13,11 +13,11 @@ if not exist ".venv" (
     python -m venv .venv
     echo Installing dependencies...
     call .venv\Scripts\activate
-    pip install fastmcp httpx pydantic
+    pip install -e .
 )
 
 REM Activate virtual environment and start server
 call .venv\Scripts\activate
-python server.py
+python -m gns3_mcp.server
 
 pause

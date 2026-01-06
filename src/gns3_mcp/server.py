@@ -1,0 +1,1444 @@
+#!/usr/bin/env python3
+"""
+GNS3 MCP Server - Comprehensive FastMCP implementation
+Complete GNS3 network simulation integration with 40+ tools.
+
+This MCP server provides comprehensive tools for managing GNS3 network topologies,
+project management, device configuration, and simulation control.
+"""
+
+import asyncio
+import json
+import logging
+from typing import Any, Dict, List, Optional
+
+from fastmcp import FastMCP
+
+from .gns3_client import GNS3APIClient, GNS3Config
+from .telnet_client import TelnetClient
+from .config_templates import ConfigTemplates, TopologyTemplates
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Create FastMCP server instance
+mcp = FastMCP("GNS3 Network Simulator")
+
+
+# ==================== HELPER FUNCTIONS ====================
+
+def create_client(server_url: str, username: Optional[str], password: Optional[str]) -> GNS3APIClient:
+    """Create and return a GNS3 API client."""
+    config = GNS3Config(server_url=server_url, username=username, password=password)
+    return GNS3APIClient(config)
+
+
+async def get_node_by_name(client: GNS3APIClient, project_id: str, node_name: str) -> Optional[Dict[str, Any]]:
+    """Find a node by name in a project."""
+    nodes = await client.get_project_nodes(project_id)
+    for node in nodes:
+        if node.get("name") == node_name:
+            return node
+    return None
+
+
+# ==================== SERVER & COMPUTE TOOLS ====================
+
+@mcp.tool
+async def gns3_get_server_info(
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get GNS3 server version and information.
+    Returns server version, supported features, and system information.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        info = await client.get_server_info()
+        return {"status": "success", "server_info": info}
+    except Exception as e:
+        logger.error(f"Failed to get server info: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_list_computes(
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    List all available compute servers (local, VMs, remote).
+    Shows compute ID, name, protocol, host, port, and status.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        computes = await client.get_compute_list()
+        return {"status": "success", "computes": computes, "total": len(computes)}
+    except Exception as e:
+        logger.error(f"Failed to list computes: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== PROJECT MANAGEMENT TOOLS ====================
+
+@mcp.tool
+async def gns3_list_projects(
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    List all projects on the GNS3 server with detailed status.
+    Shows project name, ID, node/link counts, and status.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        projects = await client.get_projects()
+        
+        projects_summary = []
+        for project in projects:
+            projects_summary.append({
+                "name": project.get("name", "Unnamed"),
+                "project_id": project.get("project_id", ""),
+                "status": project.get("status", "unknown"),
+                "path": project.get("path", ""),
+                "filename": project.get("filename", ""),
+                "auto_close": project.get("auto_close", False),
+                "auto_open": project.get("auto_open", False),
+                "auto_start": project.get("auto_start", False),
+            })
+        
+        return {
+            "status": "success",
+            "projects": projects_summary,
+            "total_projects": len(projects_summary)
+        }
+    except Exception as e:
+        logger.error(f"Failed to list projects: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_create_project(
+    name: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    auto_close: bool = False,
+    auto_open: bool = False,
+    auto_start: bool = False,
+    path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Create a new GNS3 project.
+    
+    Args:
+        name: Project name
+        auto_close: Automatically close when server stops
+        auto_open: Automatically open when server starts
+        auto_start: Automatically start all nodes when opened
+        path: Custom path for project files
+    """
+    try:
+        client = create_client(server_url, username, password)
+        project = await client.create_project(name, auto_close, auto_open, auto_start, path)
+        return {"status": "success", "project": project}
+    except Exception as e:
+        logger.error(f"Failed to create project: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_get_project(
+    project_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get detailed information about a specific project.
+    Returns complete project configuration and statistics.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        project = await client.get_project(project_id)
+        return {"status": "success", "project": project}
+    except Exception as e:
+        logger.error(f"Failed to get project: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_update_project(
+    project_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    name: Optional[str] = None,
+    auto_close: Optional[bool] = None,
+    auto_open: Optional[bool] = None,
+    auto_start: Optional[bool] = None
+) -> Dict[str, Any]:
+    """
+    Update project settings.
+    Only specified parameters will be updated.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        update_data = {}
+        if name is not None:
+            update_data["name"] = name
+        if auto_close is not None:
+            update_data["auto_close"] = auto_close
+        if auto_open is not None:
+            update_data["auto_open"] = auto_open
+        if auto_start is not None:
+            update_data["auto_start"] = auto_start
+        
+        project = await client.update_project(project_id, **update_data)
+        return {"status": "success", "project": project}
+    except Exception as e:
+        logger.error(f"Failed to update project: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_open_project(
+    project_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """Open an existing GNS3 project for editing."""
+    try:
+        client = create_client(server_url, username, password)
+        opened_project = await client.open_project(project_id)
+        return {"status": "success", "project": opened_project}
+    except Exception as e:
+        logger.error(f"Failed to open project: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_close_project(
+    project_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """Close an open project. All nodes will be stopped."""
+    try:
+        client = create_client(server_url, username, password)
+        closed_project = await client.close_project(project_id)
+        return {"status": "success", "project": closed_project, "message": "Project closed successfully"}
+    except Exception as e:
+        logger.error(f"Failed to close project: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_delete_project(
+    project_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Permanently delete a project and all its files.
+    WARNING: This action cannot be undone!
+    """
+    try:
+        client = create_client(server_url, username, password)
+        await client.delete_project(project_id)
+        return {"status": "success", "message": f"Project {project_id} deleted permanently"}
+    except Exception as e:
+        logger.error(f"Failed to delete project: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_duplicate_project(
+    project_id: str,
+    new_name: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Duplicate an existing project with a new name.
+    Creates an exact copy of the project including all nodes and configurations.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        duplicated = await client.duplicate_project(project_id, new_name, path)
+        return {"status": "success", "project": duplicated, "message": "Project duplicated successfully"}
+    except Exception as e:
+        logger.error(f"Failed to duplicate project: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== NODE MANAGEMENT TOOLS ====================
+
+@mcp.tool
+async def gns3_list_nodes(
+    project_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    List all nodes (devices) in a project.
+    Shows node name, type, status, console port, and position.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        nodes = await client.get_project_nodes(project_id)
+        
+        nodes_summary = []
+        for node in nodes:
+            nodes_summary.append({
+                "name": node.get("name"),
+                "node_id": node.get("node_id"),
+                "node_type": node.get("node_type"),
+                "status": node.get("status"),
+                "console": node.get("console"),
+                "console_type": node.get("console_type"),
+                "console_host": node.get("console_host"),
+                "x": node.get("x"),
+                "y": node.get("y"),
+                "ports": len(node.get("ports", []))
+            })
+        
+        return {"status": "success", "nodes": nodes_summary, "total_nodes": len(nodes_summary)}
+    except Exception as e:
+        logger.error(f"Failed to list nodes: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_add_node(
+    project_id: str,
+    node_name: str,
+    template_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    x: int = 0,
+    y: int = 0,
+    compute_id: str = "local"
+) -> Dict[str, Any]:
+    """
+    Add a network device/node to a project using a template.
+    
+    Args:
+        project_id: ID of the project
+        node_name: Name for the new node
+        template_id: Template ID (use gns3_list_templates to get available templates)
+        x, y: Position coordinates on the canvas
+        compute_id: Compute server ID (default: "local")
+    """
+    try:
+        client = create_client(server_url, username, password)
+        node = await client.create_node_from_template(
+            project_id=project_id,
+            template_id=template_id,
+            x=x,
+            y=y,
+            compute_id=compute_id,
+            name=node_name
+        )
+        return {"status": "success", "node": node}
+    except Exception as e:
+        logger.error(f"Failed to add node: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_get_node(
+    project_id: str,
+    node_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get detailed information about a specific node.
+    Returns complete node configuration including ports and properties.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        node = await client.get_node(project_id, node_id)
+        return {"status": "success", "node": node}
+    except Exception as e:
+        logger.error(f"Failed to get node: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_update_node(
+    project_id: str,
+    node_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    name: Optional[str] = None,
+    x: Optional[int] = None,
+    y: Optional[int] = None,
+    properties: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Update node settings and properties.
+    
+    Args:
+        name: New node name
+        x, y: New position coordinates
+        properties: Device-specific properties (RAM, CPU, interfaces, etc.)
+    """
+    try:
+        client = create_client(server_url, username, password)
+        update_data = {}
+        if name is not None:
+            update_data["name"] = name
+        if x is not None:
+            update_data["x"] = x
+        if y is not None:
+            update_data["y"] = y
+        if properties is not None:
+            update_data["properties"] = properties
+        
+        node = await client.update_node(project_id, node_id, update_data)
+        return {"status": "success", "node": node}
+    except Exception as e:
+        logger.error(f"Failed to update node: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_delete_node(
+    project_id: str,
+    node_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Delete a node from the project.
+    All links connected to this node will also be deleted.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        await client.delete_node(project_id, node_id)
+        return {"status": "success", "message": f"Node {node_id} deleted successfully"}
+    except Exception as e:
+        logger.error(f"Failed to delete node: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_start_node(
+    project_id: str,
+    node_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """Start a specific node."""
+    try:
+        client = create_client(server_url, username, password)
+        node = await client.start_node(project_id, node_id)
+        return {"status": "success", "node": node, "message": "Node started"}
+    except Exception as e:
+        logger.error(f"Failed to start node: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_stop_node(
+    project_id: str,
+    node_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """Stop a specific node."""
+    try:
+        client = create_client(server_url, username, password)
+        node = await client.stop_node(project_id, node_id)
+        return {"status": "success", "node": node, "message": "Node stopped"}
+    except Exception as e:
+        logger.error(f"Failed to stop node: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_suspend_node(
+    project_id: str,
+    node_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """Suspend a node (pause execution, save state)."""
+    try:
+        client = create_client(server_url, username, password)
+        node = await client.suspend_node(project_id, node_id)
+        return {"status": "success", "node": node, "message": "Node suspended"}
+    except Exception as e:
+        logger.error(f"Failed to suspend node: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_reload_node(
+    project_id: str,
+    node_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """Reload a node (restart without stopping)."""
+    try:
+        client = create_client(server_url, username, password)
+        node = await client.reload_node(project_id, node_id)
+        return {"status": "success", "node": node, "message": "Node reloaded"}
+    except Exception as e:
+        logger.error(f"Failed to reload node: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_duplicate_node(
+    project_id: str,
+    node_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    x: int = 50,
+    y: int = 50
+) -> Dict[str, Any]:
+    """
+    Duplicate a node with the same configuration.
+    The duplicate will be placed at the specified offset from the original.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        node = await client.duplicate_node(project_id, node_id, x, y)
+        return {"status": "success", "node": node, "message": "Node duplicated"}
+    except Exception as e:
+        logger.error(f"Failed to duplicate node: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== BULK NODE OPERATIONS ====================
+
+@mcp.tool
+async def gns3_start_all_nodes(
+    project_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """Start all nodes in a project."""
+    try:
+        client = create_client(server_url, username, password)
+        nodes = await client.get_project_nodes(project_id)
+        
+        started = []
+        failed = []
+        
+        for node in nodes:
+            try:
+                await client.start_node(project_id, node["node_id"])
+                started.append({"node_id": node["node_id"], "name": node["name"]})
+            except Exception as e:
+                failed.append({"node_id": node["node_id"], "name": node["name"], "error": str(e)})
+        
+        return {
+            "status": "success",
+            "started_nodes": started,
+            "failed_nodes": failed,
+            "total": len(nodes),
+            "successful": len(started)
+        }
+    except Exception as e:
+        logger.error(f"Failed to start all nodes: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_stop_all_nodes(
+    project_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """Stop all nodes in a project."""
+    try:
+        client = create_client(server_url, username, password)
+        nodes = await client.get_project_nodes(project_id)
+        
+        stopped = []
+        failed = []
+        
+        for node in nodes:
+            try:
+                await client.stop_node(project_id, node["node_id"])
+                stopped.append({"node_id": node["node_id"], "name": node["name"]})
+            except Exception as e:
+                failed.append({"node_id": node["node_id"], "name": node["name"], "error": str(e)})
+        
+        return {
+            "status": "success",
+            "stopped_nodes": stopped,
+            "failed_nodes": failed,
+            "total": len(nodes),
+            "successful": len(stopped)
+        }
+    except Exception as e:
+        logger.error(f"Failed to stop all nodes: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== LINK MANAGEMENT TOOLS ====================
+
+@mcp.tool
+async def gns3_list_links(
+    project_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    List all links (connections) in a project.
+    Shows link endpoints, ports, and status.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        links = await client.get_project_links(project_id)
+        nodes = await client.get_project_nodes(project_id)
+        
+        # Create node lookup
+        node_lookup = {n["node_id"]: n["name"] for n in nodes}
+        
+        links_summary = []
+        for link in links:
+            node_a = link["nodes"][0]
+            node_b = link["nodes"][1]
+            links_summary.append({
+                "link_id": link.get("link_id"),
+                "node_a": node_lookup.get(node_a["node_id"], "Unknown"),
+                "node_a_id": node_a["node_id"],
+                "port_a": node_a.get("port_name", ""),
+                "adapter_a": node_a.get("adapter_number"),
+                "port_number_a": node_a.get("port_number"),
+                "node_b": node_lookup.get(node_b["node_id"], "Unknown"),
+                "node_b_id": node_b["node_id"],
+                "port_b": node_b.get("port_name", ""),
+                "adapter_b": node_b.get("adapter_number"),
+                "port_number_b": node_b.get("port_number"),
+                "link_type": link.get("link_type"),
+                "capturing": link.get("capturing", False)
+            })
+        
+        return {"status": "success", "links": links_summary, "total_links": len(links_summary)}
+    except Exception as e:
+        logger.error(f"Failed to list links: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_add_link(
+    project_id: str,
+    node_a_id: str,
+    node_b_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    adapter_a: int = 0,
+    port_a: int = 0,
+    adapter_b: int = 0,
+    port_b: int = 0
+) -> Dict[str, Any]:
+    """
+    Create a link between two nodes.
+    
+    Args:
+        node_a_id, node_b_id: Node IDs to connect
+        adapter_a, port_a: Adapter and port number on node A
+        adapter_b, port_b: Adapter and port number on node B
+    """
+    try:
+        client = create_client(server_url, username, password)
+        link_data = {
+            "nodes": [
+                {
+                    "node_id": node_a_id,
+                    "adapter_number": adapter_a,
+                    "port_number": port_a
+                },
+                {
+                    "node_id": node_b_id,
+                    "adapter_number": adapter_b,
+                    "port_number": port_b
+                }
+            ]
+        }
+        link = await client.create_link(project_id, link_data)
+        return {"status": "success", "link": link}
+    except Exception as e:
+        logger.error(f"Failed to add link: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_delete_link(
+    project_id: str,
+    link_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """Delete a link between nodes."""
+    try:
+        client = create_client(server_url, username, password)
+        await client.delete_link(project_id, link_id)
+        return {"status": "success", "message": f"Link {link_id} deleted successfully"}
+    except Exception as e:
+        logger.error(f"Failed to delete link: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== TOPOLOGY TOOLS ====================
+
+@mcp.tool
+async def gns3_get_topology(
+    project_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get complete network topology for a project.
+    Returns all nodes, links, and project information in one call.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        
+        project = await client.get_project(project_id)
+        nodes = await client.get_project_nodes(project_id)
+        links = await client.get_project_links(project_id)
+        
+        return {
+            "status": "success",
+            "project": {
+                "name": project.get("name"),
+                "project_id": project.get("project_id"),
+                "status": project.get("status")
+            },
+            "nodes": nodes,
+            "links": links,
+            "summary": {
+                "total_nodes": len(nodes),
+                "total_links": len(links),
+                "running_nodes": sum(1 for n in nodes if n.get("status") == "started"),
+                "stopped_nodes": sum(1 for n in nodes if n.get("status") == "stopped")
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to get topology: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== CONSOLE & CONFIGURATION TOOLS ====================
+
+@mcp.tool
+async def gns3_send_console_commands(
+    project_id: str,
+    node_id: str,
+    commands: List[str],
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    wait_for_boot: bool = True,
+    boot_timeout: int = 120,
+    enter_config_mode: bool = False,
+    save_config: bool = False,
+    enable_password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Send commands to a node's console via Telnet.
+    
+    Args:
+        commands: List of commands to execute
+        wait_for_boot: Wait for device to boot before sending commands
+        boot_timeout: Maximum time to wait for boot (seconds)
+        enter_config_mode: Automatically enter config mode (Cisco)
+        save_config: Save configuration after commands (Cisco)
+        enable_password: Enable password if required
+    """
+    try:
+        client = create_client(server_url, username, password)
+        
+        # Get console info
+        console_info = await client.get_node_console_info(project_id, node_id)
+        host = console_info.get("host")
+        port = console_info.get("port")
+        
+        if not host or not port:
+            return {"status": "error", "error": "Node has no console or is not running"}
+        
+        # Connect via telnet
+        telnet = TelnetClient(host, port, timeout=30.0)
+        if not telnet.connect():
+            return {"status": "error", "error": f"Failed to connect to console {host}:{port}"}
+        
+        try:
+            # Wait for boot if requested
+            if wait_for_boot:
+                if not telnet.wait_for_boot(timeout=boot_timeout):
+                    return {"status": "error", "error": "Timeout waiting for device boot"}
+            
+            # Use enhanced config command sending if needed
+            if enter_config_mode:
+                outputs = telnet.send_config_commands(
+                    commands,
+                    enter_config=True,
+                    save_config=save_config,
+                    enable_password=enable_password
+                )
+                results = [{"command": cmd, "response": output} 
+                          for cmd, output in zip(commands, outputs)]
+            else:
+                # Send commands one by one
+                results = []
+                prompts = [">", "#", "$", "%"]
+                for cmd in commands:
+                    output = telnet.send_cmd(cmd, wait_for=prompts, wait_time=1.0)
+                    results.append({"command": cmd, "response": output})
+            
+            return {
+                "status": "success",
+                "node_name": console_info.get("name"),
+                "results": results
+            }
+        finally:
+            telnet.close()
+            
+    except Exception as e:
+        logger.error(f"Failed to send console commands: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_get_node_config(
+    project_id: str,
+    node_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    config_type: str = "running"
+) -> Dict[str, Any]:
+    """
+    Get device configuration via console.
+    
+    Args:
+        config_type: "running" or "startup" (Cisco-style devices)
+    """
+    try:
+        client = create_client(server_url, username, password)
+        console_info = await client.get_node_console_info(project_id, node_id)
+        host = console_info.get("host")
+        port = console_info.get("port")
+        
+        if not host or not port:
+            return {"status": "error", "error": "Node has no console or is not running"}
+        
+        telnet = TelnetClient(host, port, timeout=30.0)
+        if not telnet.connect():
+            return {"status": "error", "error": f"Failed to connect to console"}
+        
+        try:
+            telnet.wait_for_boot(timeout=10)
+            
+            if config_type == "running":
+                config = telnet.get_running_config()
+            else:
+                config = telnet.send_cmd("show startup-config", wait_for=["#"], wait_time=5.0)
+            
+            return {
+                "status": "success",
+                "node_name": console_info.get("name"),
+                "config_type": config_type,
+                "configuration": config
+            }
+        finally:
+            telnet.close()
+            
+    except Exception as e:
+        logger.error(f"Failed to get node config: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== CONFIGURATION TEMPLATE TOOLS ====================
+
+@mcp.tool
+async def gns3_apply_config_template(
+    project_id: str,
+    node_id: str,
+    template_name: str,
+    template_params: Dict[str, Any],
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    save_config: bool = True
+) -> Dict[str, Any]:
+    """
+    Apply a pre-built configuration template to a device.
+    
+    Supported templates:
+    - "basic_router": Basic router setup (hostname, domain)
+    - "interface": Configure interface with IP
+    - "ospf": Configure OSPF routing
+    - "eigrp": Configure EIGRP routing
+    - "bgp": Configure BGP routing
+    - "static_route": Add static route
+    - "vlan": Create VLAN
+    - "trunk_port": Configure trunk port
+    - "access_port": Configure access port
+    - "dhcp_pool": Configure DHCP server
+    - "nat_overload": Configure NAT/PAT
+    - "ssh": Configure SSH access
+    
+    Args:
+        template_name: Name of configuration template
+        template_params: Parameters for the template (varies by template)
+        save_config: Save configuration after applying
+    """
+    try:
+        # Generate commands based on template
+        commands = []
+        
+        if template_name == "basic_router":
+            commands = ConfigTemplates.basic_router_config(
+                template_params["hostname"],
+                template_params.get("domain", "local")
+            )
+        elif template_name == "interface":
+            commands = ConfigTemplates.interface_config(
+                template_params["interface"],
+                template_params["ip_address"],
+                template_params["subnet_mask"],
+                template_params.get("description")
+            )
+        elif template_name == "ospf":
+            commands = ConfigTemplates.ospf_config(
+                template_params["process_id"],
+                template_params["router_id"],
+                template_params["networks"]
+            )
+        elif template_name == "eigrp":
+            commands = ConfigTemplates.eigrp_config(
+                template_params["as_number"],
+                template_params["networks"],
+                template_params.get("router_id")
+            )
+        elif template_name == "bgp":
+            commands = ConfigTemplates.bgp_config(
+                template_params["as_number"],
+                template_params["router_id"],
+                template_params["neighbors"]
+            )
+        elif template_name == "static_route":
+            commands = ConfigTemplates.static_route(
+                template_params["network"],
+                template_params["mask"],
+                template_params["next_hop"],
+                template_params.get("admin_distance")
+            )
+        elif template_name == "vlan":
+            commands = ConfigTemplates.vlan_config(
+                template_params["vlan_id"],
+                template_params["name"]
+            )
+        elif template_name == "trunk_port":
+            commands = ConfigTemplates.trunk_port_config(
+                template_params["interface"],
+                template_params.get("allowed_vlans")
+            )
+        elif template_name == "access_port":
+            commands = ConfigTemplates.access_port_config(
+                template_params["interface"],
+                template_params["vlan"],
+                template_params.get("portfast", True),
+                template_params.get("bpduguard", True)
+            )
+        elif template_name == "dhcp_pool":
+            commands = ConfigTemplates.dhcp_pool_config(
+                template_params["pool_name"],
+                template_params["network"],
+                template_params["mask"],
+                template_params["default_router"],
+                template_params.get("dns_servers"),
+                template_params.get("excluded_addresses")
+            )
+        elif template_name == "nat_overload":
+            commands = ConfigTemplates.nat_overload_config(
+                template_params["inside_interfaces"],
+                template_params["outside_interface"],
+                template_params["acl_number"],
+                template_params["allowed_networks"]
+            )
+        elif template_name == "ssh":
+            commands = ConfigTemplates.ssh_config(
+                template_params["domain"],
+                template_params["username"],
+                template_params["password"],
+                template_params.get("crypto_key_size", 1024),
+                template_params.get("vty_lines", "0 4")
+            )
+        else:
+            return {"status": "error", "error": f"Unknown template: {template_name}"}
+        
+        # Apply configuration
+        result = await gns3_send_console_commands(
+            project_id=project_id,
+            node_id=node_id,
+            commands=commands,
+            server_url=server_url,
+            username=username,
+            password=password,
+            enter_config_mode=True,
+            save_config=save_config
+        )
+        
+        if result["status"] == "success":
+            result["template_applied"] = template_name
+            result["commands_sent"] = commands
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Failed to apply config template: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== TEMPLATE & APPLIANCE TOOLS ====================
+
+@mcp.tool
+async def gns3_list_templates(
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    List all available device templates.
+    Templates are used to create new nodes quickly.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        templates = await client.get_templates()
+        
+        templates_summary = []
+        for template in templates:
+            templates_summary.append({
+                "name": template.get("name"),
+                "template_id": template.get("template_id"),
+                "template_type": template.get("template_type"),
+                "category": template.get("category"),
+                "builtin": template.get("builtin", False),
+                "symbol": template.get("symbol")
+            })
+        
+        return {"status": "success", "templates": templates_summary, "total": len(templates_summary)}
+    except Exception as e:
+        logger.error(f"Failed to list templates: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_list_appliances(
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    List all available appliances.
+    Appliances are pre-configured device definitions that can be installed.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        appliances = await client.get_appliances()
+        
+        appliances_summary = []
+        for appliance in appliances:
+            appliances_summary.append({
+                "name": appliance.get("name"),
+                "appliance_id": appliance.get("appliance_id"),
+                "category": appliance.get("category"),
+                "vendor": appliance.get("vendor"),
+                "product_name": appliance.get("product_name"),
+                "status": appliance.get("status")
+            })
+        
+        return {"status": "success", "appliances": appliances_summary, "total": len(appliances_summary)}
+    except Exception as e:
+        logger.error(f"Failed to list appliances: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== SNAPSHOT TOOLS ====================
+
+@mcp.tool
+async def gns3_list_snapshots(
+    project_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """List all snapshots for a project."""
+    try:
+        client = create_client(server_url, username, password)
+        snapshots = await client.get_snapshots(project_id)
+        return {"status": "success", "snapshots": snapshots, "total": len(snapshots)}
+    except Exception as e:
+        logger.error(f"Failed to list snapshots: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_create_snapshot(
+    project_id: str,
+    snapshot_name: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Create a snapshot (backup) of a project.
+    Captures current state of all nodes and configuration.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        snapshot = await client.create_snapshot(project_id, snapshot_name)
+        return {"status": "success", "snapshot": snapshot}
+    except Exception as e:
+        logger.error(f"Failed to create snapshot: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_restore_snapshot(
+    project_id: str,
+    snapshot_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Restore a project from a snapshot.
+    WARNING: Current project state will be lost!
+    """
+    try:
+        client = create_client(server_url, username, password)
+        result = await client.restore_snapshot(project_id, snapshot_id)
+        return {"status": "success", "result": result, "message": "Snapshot restored successfully"}
+    except Exception as e:
+        logger.error(f"Failed to restore snapshot: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_delete_snapshot(
+    project_id: str,
+    snapshot_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """Delete a snapshot permanently."""
+    try:
+        client = create_client(server_url, username, password)
+        await client.delete_snapshot(project_id, snapshot_id)
+        return {"status": "success", "message": f"Snapshot {snapshot_id} deleted"}
+    except Exception as e:
+        logger.error(f"Failed to delete snapshot: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== PACKET CAPTURE TOOLS ====================
+
+@mcp.tool
+async def gns3_start_capture(
+    project_id: str,
+    link_id: str,
+    capture_file_name: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    data_link_type: str = "DLT_EN10MB"
+) -> Dict[str, Any]:
+    """
+    Start packet capture on a link.
+    Captured packets can be analyzed with Wireshark.
+    
+    Args:
+        capture_file_name: Name for the capture file (without .pcap extension)
+        data_link_type: Data link layer type (default: Ethernet)
+    """
+    try:
+        client = create_client(server_url, username, password)
+        result = await client.start_capture(project_id, link_id, capture_file_name, data_link_type)
+        return {"status": "success", "capture": result, "message": "Packet capture started"}
+    except Exception as e:
+        logger.error(f"Failed to start capture: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_stop_capture(
+    project_id: str,
+    link_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """Stop packet capture on a link."""
+    try:
+        client = create_client(server_url, username, password)
+        result = await client.stop_capture(project_id, link_id)
+        return {"status": "success", "message": "Packet capture stopped"}
+    except Exception as e:
+        logger.error(f"Failed to stop capture: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== DRAWING & ANNOTATION TOOLS ====================
+
+@mcp.tool
+async def gns3_add_text_annotation(
+    project_id: str,
+    text: str,
+    x: int,
+    y: int,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    rotation: int = 0
+) -> Dict[str, Any]:
+    """
+    Add text annotation to the topology.
+    Useful for documenting networks and adding labels.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        drawing_data = {
+            "svg": f'<text font-family="TypeWriter" font-size="10" fill="#000000">{text}</text>',
+            "x": x,
+            "y": y,
+            "rotation": rotation
+        }
+        drawing = await client.create_drawing(project_id, drawing_data)
+        return {"status": "success", "drawing": drawing}
+    except Exception as e:
+        logger.error(f"Failed to add text annotation: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_add_shape(
+    project_id: str,
+    shape_type: str,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    color: str = "#000000",
+    fill_color: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Add a shape (rectangle or ellipse) to the topology.
+    
+    Args:
+        shape_type: "rectangle" or "ellipse"
+        color: Border color (hex format)
+        fill_color: Fill color (hex format, optional)
+    """
+    try:
+        client = create_client(server_url, username, password)
+        
+        if shape_type == "rectangle":
+            svg = f'<rect width="{width}" height="{height}" stroke="{color}" fill="{fill_color or "none"}" />'
+        elif shape_type == "ellipse":
+            rx = width // 2
+            ry = height // 2
+            svg = f'<ellipse cx="{rx}" cy="{ry}" rx="{rx}" ry="{ry}" stroke="{color}" fill="{fill_color or "none"}" />'
+        else:
+            return {"status": "error", "error": f"Unknown shape type: {shape_type}"}
+        
+        drawing_data = {
+            "svg": svg,
+            "x": x,
+            "y": y
+        }
+        drawing = await client.create_drawing(project_id, drawing_data)
+        return {"status": "success", "drawing": drawing}
+    except Exception as e:
+        logger.error(f"Failed to add shape: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== ADVANCED & UTILITY TOOLS ====================
+
+@mcp.tool
+async def gns3_get_idle_pc_values(
+    project_id: str,
+    node_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    auto_compute: bool = True
+) -> Dict[str, Any]:
+    """
+    Get idle-pc values for Dynamips routers to reduce CPU usage.
+    Only works with Dynamips/IOS routers.
+    
+    Args:
+        auto_compute: Automatically compute best idle-pc value
+    """
+    try:
+        client = create_client(server_url, username, password)
+        
+        if auto_compute:
+            result = await client.get_node_dynamips_auto_idlepc(project_id, node_id)
+            return {"status": "success", "idlepc": result}
+        else:
+            proposals = await client.get_node_dynamips_idlepc_proposals(project_id, node_id)
+            return {"status": "success", "idlepc_proposals": proposals}
+    except Exception as e:
+        logger.error(f"Failed to get idle-pc values: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_bulk_configure_nodes(
+    project_id: str,
+    configurations: List[Dict[str, Any]],
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Configure multiple nodes in one operation.
+    
+    Args:
+        configurations: List of dicts with keys:
+            - node_id: Node to configure
+            - commands: List of commands to send
+            - save_config: Whether to save (optional, default False)
+    """
+    try:
+        results = []
+        
+        for config in configurations:
+            result = await gns3_send_console_commands(
+                project_id=project_id,
+                node_id=config["node_id"],
+                commands=config["commands"],
+                server_url=server_url,
+                username=username,
+                password=password,
+                enter_config_mode=config.get("enter_config_mode", True),
+                save_config=config.get("save_config", False)
+            )
+            results.append({
+                "node_id": config["node_id"],
+                "result": result
+            })
+        
+        successful = sum(1 for r in results if r["result"]["status"] == "success")
+        
+        return {
+            "status": "success",
+            "results": results,
+            "total": len(configurations),
+            "successful": successful,
+            "failed": len(configurations) - successful
+        }
+    except Exception as e:
+        logger.error(f"Failed bulk configuration: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_validate_topology(
+    project_id: str,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Validate network topology for common issues.
+    Checks for disconnected nodes, missing links, and configuration problems.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        
+        nodes = await client.get_project_nodes(project_id)
+        links = await client.get_project_links(project_id)
+        
+        issues = []
+        warnings = []
+        
+        # Check for nodes without links
+        connected_nodes = set()
+        for link in links:
+            connected_nodes.add(link["nodes"][0]["node_id"])
+            connected_nodes.add(link["nodes"][1]["node_id"])
+        
+        for node in nodes:
+            if node["node_id"] not in connected_nodes:
+                warnings.append(f"Node '{node['name']}' has no connections")
+        
+        # Check for stopped critical nodes
+        for node in nodes:
+            if node.get("node_type") in ["dynamips", "iou", "qemu"] and node.get("status") != "started":
+                warnings.append(f"Critical node '{node['name']}' is not running")
+        
+        # Check for overlapping nodes
+        positions = {}
+        for node in nodes:
+            pos = (node.get("x"), node.get("y"))
+            if pos in positions:
+                issues.append(f"Nodes '{node['name']}' and '{positions[pos]}' overlap at position {pos}")
+            positions[pos] = node["name"]
+        
+        return {
+            "status": "success",
+            "validation": {
+                "total_nodes": len(nodes),
+                "total_links": len(links),
+                "connected_nodes": len(connected_nodes),
+                "disconnected_nodes": len(nodes) - len(connected_nodes),
+                "issues": issues,
+                "warnings": warnings,
+                "is_valid": len(issues) == 0
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to validate topology: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== MAIN ====================
+
+if __name__ == "__main__":
+    # Run the MCP server
+    mcp.run()

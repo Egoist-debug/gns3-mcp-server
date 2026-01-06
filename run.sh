@@ -24,4 +24,4 @@ if [[ -z "$GNS3_USERNAME" ]]; then
 fi
 
 # Start STDIO mode MCP server
-exec uv run server.py
+exec uv run python -m gns3_mcp.server
