@@ -266,7 +266,7 @@ Args:
   - ssh_username: Guest user (or GNS3_SSH_USER)
   - ssh_password: Guest password (or GNS3_SSH_PASSWORD)
   - stop_on_error: Stop after first non-zero exit (default true)
-  - host_key_policy: accept_new | strict | warn (default accept_new)
+  - host_key_policy: accept_new (accept any key) | strict (default known_hosts) | warn (accept + log fingerprint)
   - username/password: GNS3 API auth for metadata lookup only
 
 Returns per command: {command, stdout, stderr, exit_code}

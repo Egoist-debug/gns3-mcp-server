@@ -12,8 +12,11 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .gns3_client import GNS3Config, _env_bool
+
 logger = logging.getLogger(__name__)
 
+# Keep a single default owner: GNS3Config.server_url Field default.
 DEFAULT_SERVER_URL = "http://localhost:3080"
 DEFAULT_START_CMD = "gns3server"
 DEFAULT_START_TIMEOUT = 30.0
@@ -23,7 +26,6 @@ DEFAULT_PROBE_TIMEOUT = 3.0
 _lock = asyncio.Lock()
 # url -> (monotonic_ts, server_info)
 _healthy_cache: Dict[str, Tuple[float, Any]] = {}
-_last_start_stderr: str = ""
 
 
 def _env_float(name: str, default: float) -> float:
@@ -37,10 +39,11 @@ def _env_float(name: str, default: float) -> float:
 
 
 def normalize_server_url(server_url: Optional[str]) -> str:
-    url = (server_url or os.environ.get("GNS3_SERVER_URL") or DEFAULT_SERVER_URL).strip()
-    if not url:
-        url = DEFAULT_SERVER_URL
-    return url.rstrip("/")
+    """Normalize server URL; share default/env fallback with GNS3Config."""
+    if server_url is not None and str(server_url).strip():
+        return str(server_url).strip().rstrip("/")
+    # GNS3Config owns GNS3_SERVER_URL + default base URL
+    return GNS3Config.from_env().server_url.rstrip("/")
 
 
 def is_local_server_url(server_url: str) -> bool:
@@ -79,13 +82,6 @@ def build_start_command(server_url: str) -> list[str]:
     return argv
 
 
-def _env_verify_ssl() -> bool:
-    raw = os.environ.get("GNS3_VERIFY_SSL")
-    if raw is None:
-        return True
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-
 async def probe_server(
     server_url: str,
     *,
@@ -106,7 +102,9 @@ async def probe_server(
     if username and password:
         auth = (username, password)
     try:
-        async with httpx.AsyncClient(timeout=timeout, verify=_env_verify_ssl()) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout, verify=_env_bool("GNS3_VERIFY_SSL", True)
+        ) as client:
             resp = await client.get(url, auth=auth)
             if resp.status_code == 200:
                 try:
@@ -153,36 +151,27 @@ def clear_healthy_cache() -> None:
 
 
 async def _spawn_server(argv: list[str]) -> Tuple[Optional[int], str]:
-    """Spawn detached gns3server. Returns (pid_or_none, stderr_tail)."""
-    global _last_start_stderr
+    """Spawn detached gns3server. Returns (pid_or_none, start_note).
+
+    Stdio is fully detached (DEVNULL) so a chatty child cannot fill a pipe
+    buffer and block while we wait for health.
+    """
     logger.warning("Starting GNS3 server: %s", " ".join(argv))
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
             stdin=asyncio.subprocess.DEVNULL,
             start_new_session=True,
         )
     except FileNotFoundError as e:
-        _last_start_stderr = str(e)
         return None, str(e)
     except Exception as e:
-        _last_start_stderr = str(e)
         return None, str(e)
 
-    stderr_tail = ""
-    try:
-        assert proc.stderr is not None
-        try:
-            chunk = await asyncio.wait_for(proc.stderr.read(4000), timeout=0.5)
-            stderr_tail = chunk.decode("utf-8", errors="replace")
-        except asyncio.TimeoutError:
-            pass
-    except Exception:
-        pass
-    _last_start_stderr = stderr_tail
-    return proc.pid, stderr_tail
+    # Detached: do not wait on stdio. Caller polls health separately.
+    return proc.pid, f"spawned pid={proc.pid}"
 
 
 async def ensure_gns3_server(

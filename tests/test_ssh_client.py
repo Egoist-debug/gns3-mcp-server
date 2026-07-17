@@ -21,12 +21,48 @@ class ExtractIpTests(unittest.TestCase):
 
 
 class HostKeyPolicyTests(unittest.TestCase):
-    def test_accept_new_disables_known_hosts(self):
-        # asyncssh: () disables checking; None uses default files
-        self.assertEqual(ssh_client._known_hosts_for_policy("accept_new"), ())
-
     def test_strict_uses_default_known_hosts(self):
-        self.assertIsNone(ssh_client._known_hosts_for_policy("strict"))
+        # strict: no known_hosts override → asyncssh loads default files
+        kwargs = ssh_client._connect_kwargs_for_policy("strict")
+        self.assertEqual(kwargs, {})
+
+    def test_accept_new_skips_known_hosts(self):
+        # known_hosts=None disables verification and skips client validator
+        kwargs = ssh_client._connect_kwargs_for_policy("accept_new")
+        self.assertEqual(kwargs, {"known_hosts": None})
+
+    def test_warn_uses_empty_known_hosts_and_logs(self):
+        kwargs = ssh_client._connect_kwargs_for_policy("warn")
+        self.assertEqual(kwargs.get("known_hosts"), b"")
+        self.assertIs(kwargs.get("client_factory"), ssh_client._WarnHostKeyClient)
+        client = ssh_client._WarnHostKeyClient()
+        key = MagicMock()
+        key.get_fingerprint.return_value = "SHA256:test"
+        with self.assertLogs("gns3_mcp.ssh_client", level="WARNING") as cm:
+            self.assertTrue(client.validate_host_public_key("h", "1.2.3.4", 22, key))
+        self.assertTrue(any("fingerprint=SHA256:test" in m for m in cm.output))
+
+
+class CredentialResolverTests(unittest.TestCase):
+    def test_console_args_override_env(self):
+        with patch.dict(
+            "os.environ",
+            {"GNS3_CONSOLE_USER": "envu", "GNS3_CONSOLE_PASSWORD": "envp"},
+            clear=False,
+        ):
+            u, p = ssh_client.resolve_console_credentials("argu", "argp")
+            self.assertEqual((u, p), ("argu", "argp"))
+            u, p = ssh_client.resolve_console_credentials(None, None)
+            self.assertEqual((u, p), ("envu", "envp"))
+
+    def test_ssh_args_override_env(self):
+        with patch.dict(
+            "os.environ",
+            {"GNS3_SSH_USER": "envu", "GNS3_SSH_PASSWORD": "envp"},
+            clear=False,
+        ):
+            u, p = ssh_client.resolve_ssh_credentials("argu", "argp")
+            self.assertEqual((u, p), ("argu", "argp"))
 
 
 class ExecCommandsTests(unittest.IsolatedAsyncioTestCase):
@@ -44,14 +80,17 @@ class ExecCommandsTests(unittest.IsolatedAsyncioTestCase):
         conn.__aenter__ = AsyncMock(return_value=conn)
         conn.__aexit__ = AsyncMock(return_value=None)
 
-        with patch("gns3_mcp.ssh_client.asyncssh.connect", return_value=conn):
+        with patch("gns3_mcp.ssh_client.asyncssh.connect", return_value=conn) as connect:
             out = await ssh_client.exec_commands(
                 "10.0.0.1",
                 ["echo ok", "false", "echo never"],
                 username="user",
                 password="pass",
                 stop_on_error=True,
+                host_key_policy="accept_new",
             )
+            kwargs = connect.call_args.kwargs
+            self.assertIsNone(kwargs.get("known_hosts"))
         self.assertEqual(out["status"], "error")
         self.assertTrue(out["authenticated"])
         self.assertEqual(len(out["results"]), 2)

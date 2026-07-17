@@ -106,11 +106,12 @@ Explicit tool: `gns3_ensure_server`. Guest login uses `login_username`/`login_pa
 ## 🎮 **Available MCP Tools (40+)**
 
 ### **📚 Quick Reference**
-See [docs/TOOL_REFERENCE.md](docs/TOOL_REFERENCE.md) for complete documentation of all 42 tools.
+See [docs/TOOL_REFERENCE.md](docs/TOOL_REFERENCE.md) for complete documentation of all tools.
 
 ### **🔧 Key Tool Categories**
 
-#### **Server & Compute Management (2 tools)**
+#### **Server & Compute Management (3 tools)**
+- `gns3_ensure_server` - Probe GNS3 and auto-start localhost if needed
 - `gns3_get_server_info` - Get GNS3 server version and information
 - `gns3_list_computes` - List all available compute servers
 
@@ -144,9 +145,12 @@ See [docs/TOOL_REFERENCE.md](docs/TOOL_REFERENCE.md) for complete documentation 
 - `gns3_get_topology` - Complete network overview
 
 #### **Console & Configuration (3 tools)**
-- `gns3_send_console_commands` - Send CLI commands to devices
+- `gns3_send_console_commands` - Send CLI commands to devices (optional console login)
 - `gns3_get_node_config` - Get device configuration
 - `gns3_apply_config_template` - Apply pre-built configurations
+
+#### **SSH Guest Access (1 tool)**
+- `gns3_ssh_exec` - Run shell commands on a guest VM/host over SSH (password auth)
 
 #### **Template & Appliance (2 tools)**
 - `gns3_list_templates` - List available device templates

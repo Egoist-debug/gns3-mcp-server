@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import asyncssh
 
@@ -19,9 +19,28 @@ _IPV4_RE = re.compile(
 def resolve_ssh_credentials(
     ssh_username: Optional[str] = None,
     ssh_password: Optional[str] = None,
-) -> tuple[Optional[str], Optional[str]]:
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve SSH credentials: explicit args override env."""
     user = ssh_username if ssh_username is not None else os.environ.get("GNS3_SSH_USER")
     password = ssh_password if ssh_password is not None else os.environ.get("GNS3_SSH_PASSWORD")
+    return user, password
+
+
+def resolve_console_credentials(
+    login_username: Optional[str] = None,
+    login_password: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve console login credentials: explicit args override env."""
+    user = (
+        login_username
+        if login_username is not None
+        else os.environ.get("GNS3_CONSOLE_USER")
+    )
+    password = (
+        login_password
+        if login_password is not None
+        else os.environ.get("GNS3_CONSOLE_PASSWORD")
+    )
     return user, password
 
 
@@ -33,17 +52,64 @@ def resolve_host_key_policy(policy: Optional[str] = None) -> str:
     return value
 
 
-def _known_hosts_for_policy(policy: str):
-    """Map policy name to asyncssh known_hosts argument.
 
-    asyncssh: ``None`` = default known_hosts files; ``()`` = disable checking.
+class _WarnHostKeyClient(asyncssh.SSHClient):
+    """Warn policy: accept any key but log a warning with fingerprint."""
+
+    def validate_host_public_key(self, host: str, addr: str, port: int, key) -> bool:
+        try:
+            fp = key.get_fingerprint()
+        except Exception:
+            fp = "unknown"
+        logger.warning(
+            "SSH host key not in known_hosts; accepting with warn policy host=%s addr=%s port=%s fingerprint=%s",
+            host,
+            addr,
+            port,
+            fp,
+        )
+        return True
+
+    def validate_host_ca_key(self, host: str, addr: str, port: int, key) -> bool:
+        try:
+            fp = key.get_fingerprint()
+        except Exception:
+            fp = "unknown"
+        logger.warning(
+            "SSH host CA key not in known_hosts; accepting with warn policy host=%s fingerprint=%s",
+            host,
+            fp,
+        )
+        return True
+
+
+def _connect_kwargs_for_policy(policy: str) -> Dict[str, Any]:
+    """Build asyncssh.connect kwargs for a named host-key policy.
+
+    asyncssh host-key gates:
+    - ``known_hosts is None`` → ``_trusted_host_keys is None`` → accept any key,
+      and ``validate_host_public_key`` is **not** called.
+    - ``known_hosts`` omitted / ``()`` → load default ``~/.ssh/known_hosts``.
+    - ``known_hosts=b''`` → empty trusted set → unknown keys call the client
+      validator (used for ``warn`` so we can log fingerprints).
+
+    Policies:
+    - ``strict``: default known_hosts files; unknown keys fail.
+    - ``accept_new``: no known_hosts check; accept any key (lab default).
+    - ``warn``: accept any key, but log host/fingerprint via client validator.
     """
     if policy == "strict":
-        return None  # use system/user known_hosts
-    # accept_new / warn: lab default — do not enforce known_hosts
+        # Load default known_hosts; do not override validator
+        return {}
     if policy == "warn":
-        logger.warning("SSH host_key_policy=warn: host key checking disabled (lab mode)")
-    return ()
+        return {
+            "known_hosts": b"",
+            "client_factory": _WarnHostKeyClient,
+        }
+    # accept_new (default): skip known_hosts entirely
+    return {
+        "known_hosts": None,
+    }
 
 
 def extract_ips_from_node(node: Dict[str, Any]) -> List[str]:
@@ -51,40 +117,55 @@ def extract_ips_from_node(node: Dict[str, Any]) -> List[str]:
     found: List[str] = []
     seen = set()
 
-    def add(text: str) -> None:
-        for m in _IPV4_RE.findall(text or ""):
-            if m.startswith("127.") or m.startswith("0."):
+    def _add(value: Any) -> None:
+        if value is None:
+            return
+        text = str(value)
+        for m in _IPV4_RE.findall(text):
+            if m.startswith("127.") or m == "0.0.0.0":
                 continue
             if m not in seen:
                 seen.add(m)
                 found.append(m)
 
+    if not isinstance(node, dict):
+        return found
+
     props = node.get("properties") or {}
     if isinstance(props, dict):
+        for key in (
+            "ip_address",
+            "ip",
+            "ipv4",
+            "management_ip",
+            "host",
+            "hostname",
+        ):
+            _add(props.get(key))
         for key, val in props.items():
-            if val is None:
-                continue
-            if isinstance(val, (str, int, float)):
-                add(str(val))
-            elif isinstance(val, dict):
-                add(str(val))
-            elif isinstance(val, list):
-                for item in val:
-                    add(str(item))
+            if "ip" in str(key).lower():
+                _add(val)
 
-    for key in ("name", "console_host", "node_type"):
-        if key in node and node[key] is not None:
-            # Prefer not to treat console_host as guest IP unless it looks non-loopback;
-            # still collect via add() filters.
-            if key == "console_host":
-                add(str(node[key]))
+    for key in ("name", "console_host", "host", "hostname"):
+        # console_host is usually the GNS3 host, not the guest — skip pure console_host
+        if key == "console_host":
+            continue
+        _add(node.get(key))
 
-    # Nested common keys
-    for key in ("ip_address", "ip", "management_ip", "hostname"):
-        if key in node and node[key]:
-            add(str(node[key]))
-        if isinstance(props, dict) and props.get(key):
-            add(str(props[key]))
+    # Nested scrapes
+    for val in node.values():
+        if isinstance(val, (str, int)):
+            _add(val)
+        elif isinstance(val, dict):
+            for v in val.values():
+                _add(v)
+        elif isinstance(val, list):
+            for item in val:
+                if isinstance(item, dict):
+                    for v in item.values():
+                        _add(v)
+                else:
+                    _add(item)
 
     return found
 
@@ -114,7 +195,6 @@ async def exec_commands(
         return {"status": "error", "error": "commands must be a non-empty list"}
 
     policy = resolve_host_key_policy(host_key_policy)
-    known_hosts = _known_hosts_for_policy(policy)
     results: List[Dict[str, Any]] = []
 
     try:
@@ -123,9 +203,9 @@ async def exec_commands(
             "port": port,
             "username": username,
             "password": password,
-            "known_hosts": known_hosts,
             "login_timeout": connect_timeout,
         }
+        conn_kwargs.update(_connect_kwargs_for_policy(policy))
         async with asyncssh.connect(**conn_kwargs) as conn:
             for cmd in commands:
                 try:

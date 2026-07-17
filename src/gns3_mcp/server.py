@@ -864,11 +864,8 @@ async def _send_console_commands_impl(
             }
 
         # Resolve console login credentials (args > env). Never log secrets.
-        resolved_login_user = (
-            login_username if login_username is not None else os.environ.get("GNS3_CONSOLE_USER")
-        )
-        resolved_login_pass = (
-            login_password if login_password is not None else os.environ.get("GNS3_CONSOLE_PASSWORD")
+        resolved_login_user, resolved_login_pass = ssh_helpers.resolve_console_credentials(
+            login_username, login_password
         )
         need_login = resolved_login_user is not None or resolved_login_pass is not None
 
