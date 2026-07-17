@@ -5,8 +5,8 @@
   "command": "run-omp.sh",
   "args": [],
   "env": {},
-  "description": "Complete GNS3 (Graphical Network Simulator-3) integration through MCP. Ensures the local GNS3 server is running, manages topologies via REST, sends console commands with optional login, and runs guest SSH commands.",
-  "description_for_agent": "GNS3 MCP server for network topology management and simulation. Tools ensure localhost gns3server is up (auto-start), manage projects/nodes/links, send device console commands (login_username/login_password), and execute guest shell commands over SSH (gns3_ssh_exec).",
+  "description": "Complete GNS3 integration via MCP tools only. Prefer these gns3_* tools over raw REST, curl, telnet, SSH, or Python scripts against GNS3. Ensures localhost gns3server, manages topologies, console (optional login), and guest SSH (gns3_ssh_exec). Pair with the gns3-mcp agent skill for hard MCP-first rules.",
+  "description_for_agent": "GNS3 MCP server. ALWAYS use these tools for GNS3 lab ops; NEVER reimplement via httpx/requests/curl to :3080, raw telnet/SSH, or ad-hoc Python. Tools: gns3_ensure_server (call first each session), projects/nodes/links, gns3_send_console_commands (login_username/login_password), gns3_ssh_exec, images, snapshots, templates list, config templates. Resolve IDs from tool results only. Load skill gns3-mcp for playbooks and the escape ritual when a tool is missing.",
   "user_params": {
     "args": {},
     "env": {
