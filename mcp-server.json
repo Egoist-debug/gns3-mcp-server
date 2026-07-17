@@ -1,1 +1,63 @@
-{"name": "agent_generated_gns3_mcp", "exhibit_name": "GNS3 Network Simulator MCP", "type": 3, "command": "run.bat", "args": [], "env": {}, "description": "Complete GNS3 (Graphical Network Simulator-3) integration through MCP. Enables AI assistants to create, manage, and simulate network topologies using the GNS3 REST API. Supports project management, network device configuration, topology building, simulation control, and traffic capture for network engineering and education.", "description_for_agent": "GNS3 MCP server for network topology management and simulation. Provides tools for project management, device configuration, network building, simulation control, and traffic analysis. Connects to GNS3 server to enable programmatic network lab creation and management.", "user_params": {"args": {}, "env": {"GNS3_SERVER_URL": {"required": false, "description": "GNS3 server URL (default: http://localhost:3080). Can be overridden per tool call."}, "GNS3_USERNAME": {"required": false, "description": "GNS3 server username for authentication (optional - anonymous access supported if not configured)."}, "GNS3_PASSWORD": {"required": false, "description": "GNS3 server password for authentication (optional - anonymous access supported if not configured)."}}}}
+{
+  "name": "agent_generated_gns3_mcp",
+  "exhibit_name": "GNS3 Network Simulator MCP",
+  "type": 3,
+  "command": "run-omp.sh",
+  "args": [],
+  "env": {},
+  "description": "Complete GNS3 (Graphical Network Simulator-3) integration through MCP. Ensures the local GNS3 server is running, manages topologies via REST, sends console commands with optional login, and runs guest SSH commands.",
+  "description_for_agent": "GNS3 MCP server for network topology management and simulation. Tools ensure localhost gns3server is up (auto-start), manage projects/nodes/links, send device console commands (login_username/login_password), and execute guest shell commands over SSH (gns3_ssh_exec).",
+  "user_params": {
+    "args": {},
+    "env": {
+      "GNS3_SERVER_URL": {
+        "required": false,
+        "description": "GNS3 server URL (default: http://localhost:3080). Can be overridden per tool call."
+      },
+      "GNS3_USERNAME": {
+        "required": false,
+        "description": "GNS3 server username for REST API authentication."
+      },
+      "GNS3_PASSWORD": {
+        "required": false,
+        "description": "GNS3 server password for REST API authentication."
+      },
+      "GNS3_VERIFY_SSL": {
+        "required": false,
+        "description": "Verify TLS certificates for GNS3 REST (default true). Set false for local/self-signed."
+      },
+      "GNS3_SERVER_START_CMD": {
+        "required": false,
+        "description": "Custom command to start gns3server. If unset, default gns3server gets --host/--port from GNS3_SERVER_URL. Custom values are never rewritten."
+      },
+      "GNS3_SERVER_START_TIMEOUT": {
+        "required": false,
+        "description": "Seconds to wait for GNS3 after auto-start (default 30)."
+      },
+      "GNS3_SERVER_HEALTHY_CACHE_SECONDS": {
+        "required": false,
+        "description": "Skip re-probe window after a healthy check (default 30)."
+      },
+      "GNS3_CONSOLE_USER": {
+        "required": false,
+        "description": "Default console login username for gns3_send_console_commands (override with login_username)."
+      },
+      "GNS3_CONSOLE_PASSWORD": {
+        "required": false,
+        "description": "Default console login password for gns3_send_console_commands (override with login_password)."
+      },
+      "GNS3_SSH_USER": {
+        "required": false,
+        "description": "Default guest SSH username for gns3_ssh_exec (override with ssh_username)."
+      },
+      "GNS3_SSH_PASSWORD": {
+        "required": false,
+        "description": "Default guest SSH password for gns3_ssh_exec (override with ssh_password)."
+      },
+      "GNS3_SSH_HOST_KEY_POLICY": {
+        "required": false,
+        "description": "SSH host-key policy: accept_new (default, accept any), strict (known_hosts), warn (accept and log fingerprint)."
+      }
+    }
+  }
+}
