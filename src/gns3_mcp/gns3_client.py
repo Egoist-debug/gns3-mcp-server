@@ -5,12 +5,21 @@ Handles all GNS3 server operations with robust error handling.
 """
 
 import logging
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import httpx
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+
+def _env_bool(name: str, default: bool = True) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 class GNS3Config(BaseModel):
@@ -21,53 +30,97 @@ class GNS3Config(BaseModel):
     verify_ssl: bool = Field(default=True, description="Verify SSL certificates")
     timeout: float = Field(default=30.0, description="Request timeout in seconds")
 
+    @classmethod
+    def from_env(
+        cls,
+        server_url: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        verify_ssl: Optional[bool] = None,
+        timeout: Optional[float] = None,
+    ) -> "GNS3Config":
+        """Build config from explicit args with environment-variable fallbacks.
+
+        Environment variables:
+          GNS3_SERVER_URL, GNS3_USERNAME, GNS3_PASSWORD, GNS3_VERIFY_SSL, GNS3_TIMEOUT
+        """
+        return cls(
+            server_url=server_url or os.environ.get("GNS3_SERVER_URL") or "http://localhost:3080",
+            username=username if username is not None else os.environ.get("GNS3_USERNAME"),
+            password=password if password is not None else os.environ.get("GNS3_PASSWORD"),
+            verify_ssl=_env_bool("GNS3_VERIFY_SSL", True) if verify_ssl is None else verify_ssl,
+            timeout=float(os.environ["GNS3_TIMEOUT"]) if timeout is None and os.environ.get("GNS3_TIMEOUT") else (timeout if timeout is not None else 30.0),
+        )
+
 
 class GNS3APIClient:
     """Comprehensive HTTP client for GNS3 REST API v2."""
-    
+
     def __init__(self, config: GNS3Config):
         self.config = config
         self.base_url = config.server_url.rstrip('/')
         self.auth = None
         if config.username and config.password:
             self.auth = (config.username, config.password)
-    
-    async def _request(self, method: str, endpoint: str, data: Optional[Dict] = None, 
-                      params: Optional[Dict] = None) -> Union[Dict[str, Any], List[Dict[str, Any]], bytes]:
+
+    async def _request(
+        self,
+        method: str,
+        endpoint: str,
+        data: Optional[Dict] = None,
+        params: Optional[Dict] = None,
+        content: Optional[bytes] = None,
+        content_type: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> Union[Dict[str, Any], List[Dict[str, Any]], bytes, None]:
         """Make HTTP request to GNS3 API with comprehensive error handling."""
         url = f"{self.base_url}/v2{endpoint}"
-        headers = {"Content-Type": "application/json"}
-        
+        headers: Dict[str, str] = {}
+        if content is not None:
+            headers["Content-Type"] = content_type or "application/octet-stream"
+        elif data is not None:
+            headers["Content-Type"] = "application/json"
+
+        request_timeout = timeout if timeout is not None else self.config.timeout
+
         try:
-            async with httpx.AsyncClient(verify=self.config.verify_ssl, timeout=self.config.timeout) as client:
-                if method.upper() == "GET":
-                    response = await client.get(url, headers=headers, auth=self.auth, params=params)
-                elif method.upper() == "POST":
-                    response = await client.post(url, json=data, headers=headers, auth=self.auth, params=params)
-                elif method.upper() == "PUT":
-                    response = await client.put(url, json=data, headers=headers, auth=self.auth, params=params)
-                elif method.upper() == "DELETE":
-                    response = await client.delete(url, headers=headers, auth=self.auth, params=params)
-                elif method.upper() == "PATCH":
-                    response = await client.patch(url, json=data, headers=headers, auth=self.auth, params=params)
+            async with httpx.AsyncClient(verify=self.config.verify_ssl, timeout=request_timeout) as client:
+                kwargs: Dict[str, Any] = {"headers": headers, "auth": self.auth, "params": params}
+                m = method.upper()
+                if content is not None:
+                    kwargs["content"] = content
+                elif data is not None and m in {"POST", "PUT", "PATCH"}:
+                    kwargs["json"] = data
+
+                if m == "GET":
+                    response = await client.get(url, **kwargs)
+                elif m == "POST":
+                    response = await client.post(url, **kwargs)
+                elif m == "PUT":
+                    response = await client.put(url, **kwargs)
+                elif m == "DELETE":
+                    response = await client.delete(url, **kwargs)
+                elif m == "PATCH":
+                    response = await client.patch(url, **kwargs)
                 else:
                     raise ValueError(f"Unsupported HTTP method: {method}")
-                
+
                 response.raise_for_status()
-                
-                # Handle different content types
-                if response.headers.get("content-type", "").startswith("application/json"):
+
+                if response.status_code == 204 or not response.content:
+                    return None
+
+                ctype = response.headers.get("content-type", "")
+                if ctype.startswith("application/json"):
                     return response.json()
-                else:
-                    return response.content
-                
+                return response.content
+
         except httpx.RequestError as e:
             logger.error(f"Request error: {e}")
             raise Exception(f"Failed to connect to GNS3 server at {self.base_url}: {str(e)}")
         except httpx.HTTPStatusError as e:
             logger.error(f"HTTP error: {e.response.status_code} - {e.response.text}")
             raise Exception(f"GNS3 API error [{e.response.status_code}]: {e.response.text}")
-    
     # ==================== SERVER OPERATIONS ====================
     
     async def get_server_info(self) -> Dict[str, Any]:
@@ -334,16 +387,129 @@ class GNS3APIClient:
         await self._request("DELETE", f"/projects/{project_id}/drawings/{drawing_id}")
     
     # ==================== SYMBOL OPERATIONS ====================
-    
+
     async def get_symbols(self) -> List[Dict[str, Any]]:
         """List all available symbols."""
         return await self._request("GET", "/symbols")
-    
+
     async def get_symbol(self, symbol_id: str) -> bytes:
         """Get symbol image data."""
-        return await self._request("GET", f"/symbols/{symbol_id}/raw")
-    
-    async def upload_symbol(self, symbol_id: str, symbol_data: bytes) -> Dict[str, Any]:
-        """Upload a custom symbol."""
-        # This would need special handling for file upload
-        raise NotImplementedError("Symbol upload not yet implemented")
+        result = await self._request("GET", f"/symbols/{symbol_id}/raw")
+        return result if isinstance(result, (bytes, bytearray)) else b""
+
+    async def upload_symbol(self, symbol_id: str, symbol_data: bytes) -> None:
+        """Upload a custom symbol (raw body)."""
+        await self._request(
+            "POST",
+            f"/symbols/{symbol_id}/raw",
+            content=symbol_data,
+            content_type="application/octet-stream",
+        )
+
+    # ==================== IMAGE OPERATIONS ====================
+
+    async def list_images(self, compute_id: str, emulator: str) -> List[Dict[str, Any]]:
+        """List images for an emulator on a compute.
+
+        emulator: qemu | dynamips | iou | docker
+        """
+        result = await self._request("GET", f"/computes/{compute_id}/{emulator}/images")
+        if result is None:
+            return []
+        if isinstance(result, list):
+            return result
+        return [result]  # type: ignore[list-item]
+
+    async def upload_image(
+        self,
+        compute_id: str,
+        emulator: str,
+        filename: str,
+        source_path: Optional[str] = None,
+        content: Optional[bytes] = None,
+        timeout: float = 600.0,
+    ) -> Dict[str, Any]:
+        """Upload a device image to a compute (qemu/dynamips/iou).
+
+        Uses controller forward API:
+          POST /v2/computes/{compute_id}/{emulator}/images/{filename}
+        """
+        if content is None:
+            if not source_path:
+                raise ValueError("Either source_path or content is required")
+            path = Path(source_path)
+            if not path.is_file():
+                raise FileNotFoundError(f"Image file not found: {source_path}")
+            content = path.read_bytes()
+
+        safe_name = filename.lstrip("/")
+        endpoint = f"/computes/{compute_id}/{emulator}/images/{safe_name}"
+        await self._request(
+            "POST",
+            endpoint,
+            content=content,
+            content_type="application/octet-stream",
+            timeout=timeout,
+        )
+        return {
+            "compute_id": compute_id,
+            "emulator": emulator,
+            "filename": safe_name,
+            "size_bytes": len(content),
+        }
+
+    async def download_image(
+        self,
+        compute_id: str,
+        emulator: str,
+        filename: str,
+        output_path: str,
+        timeout: float = 600.0,
+    ) -> Dict[str, Any]:
+        """Download an image from compute to a local path."""
+        safe_name = filename.lstrip("/")
+        data = await self._request(
+            "GET",
+            f"/computes/{compute_id}/{emulator}/images/{safe_name}",
+            timeout=timeout,
+        )
+        if not isinstance(data, (bytes, bytearray)):
+            raise Exception("Unexpected non-binary response when downloading image")
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        return {"path": str(out), "size_bytes": len(data), "filename": safe_name}
+
+    # ==================== PROJECT EXPORT ====================
+
+    async def export_project(
+        self,
+        project_id: str,
+        output_path: str,
+        include_images: bool = False,
+        include_snapshots: bool = False,
+        reset_mac_addresses: bool = False,
+        keep_compute_ids: bool = False,
+        compression: str = "zip",
+        timeout: float = 600.0,
+    ) -> Dict[str, Any]:
+        """Export a project archive to a local file path."""
+        params = {
+            "include_images": "yes" if include_images else "no",
+            "include_snapshots": "yes" if include_snapshots else "no",
+            "reset_mac_addresses": "yes" if reset_mac_addresses else "no",
+            "keep_compute_ids": "yes" if keep_compute_ids else "no",
+            "compression": compression,
+        }
+        data = await self._request(
+            "GET",
+            f"/projects/{project_id}/export",
+            params=params,
+            timeout=timeout,
+        )
+        if not isinstance(data, (bytes, bytearray)):
+            raise Exception("Unexpected non-binary response when exporting project")
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        return {"path": str(out), "size_bytes": len(data), "project_id": project_id}

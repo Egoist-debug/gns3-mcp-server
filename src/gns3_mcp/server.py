@@ -10,6 +10,8 @@ project management, device configuration, and simulation control.
 import asyncio
 import json
 import logging
+import os
+import sys
 from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
@@ -18,21 +20,33 @@ from .gns3_client import GNS3APIClient, GNS3Config
 from .telnet_client import TelnetClient
 from .config_templates import ConfigTemplates, TopologyTemplates
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Keep MCP stdio clean: default WARNING unless GNS3_MCP_DEBUG is set.
+_log_level = logging.DEBUG if os.environ.get("GNS3_MCP_DEBUG") else logging.WARNING
+logging.basicConfig(level=_log_level, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 # Create FastMCP server instance
 mcp = FastMCP("GNS3 Network Simulator")
 
 
+
 # ==================== HELPER FUNCTIONS ====================
 
-def create_client(server_url: str, username: Optional[str], password: Optional[str]) -> GNS3APIClient:
-    """Create and return a GNS3 API client."""
-    config = GNS3Config(server_url=server_url, username=username, password=password)
-    return GNS3APIClient(config)
+def create_client(
+    server_url: Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> GNS3APIClient:
+    """Create a GNS3 API client.
 
+    Explicit args win; otherwise fall back to GNS3_* environment variables.
+    """
+    config = GNS3Config.from_env(
+        server_url=server_url,
+        username=username,
+        password=password,
+    )
+    return GNS3APIClient(config)
 
 async def get_node_by_name(client: GNS3APIClient, project_id: str, node_name: str) -> Optional[Dict[str, Any]]:
     """Find a node by name in a project."""
@@ -754,7 +768,72 @@ async def gns3_get_topology(
         return {"status": "error", "error": str(e)}
 
 
+
 # ==================== CONSOLE & CONFIGURATION TOOLS ====================
+
+async def _send_console_commands_impl(
+    project_id: str,
+    node_id: str,
+    commands: List[str],
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    wait_for_boot: bool = True,
+    boot_timeout: int = 120,
+    enter_config_mode: bool = False,
+    save_config: bool = False,
+    enable_password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Internal console command sender (not an MCP tool — safe to await)."""
+    try:
+        client = create_client(server_url, username, password)
+
+        console_info = await client.get_node_console_info(project_id, node_id)
+        host = console_info.get("host")
+        port = console_info.get("port")
+
+        if not host or not port:
+            return {"status": "error", "error": "Node has no console or is not running"}
+
+        telnet = TelnetClient(host, port, timeout=30.0)
+        if not telnet.connect():
+            return {"status": "error", "error": f"Failed to connect to console {host}:{port}"}
+
+        try:
+            if wait_for_boot:
+                if not telnet.wait_for_boot(timeout=boot_timeout):
+                    return {"status": "error", "error": "Timeout waiting for device boot"}
+
+            if enter_config_mode:
+                outputs = telnet.send_config_commands(
+                    commands,
+                    enter_config=True,
+                    save_config=save_config,
+                    enable_password=enable_password,
+                )
+                results = [
+                    {"command": cmd, "response": output}
+                    for cmd, output in zip(commands, outputs)
+                ]
+            else:
+                results = []
+                prompts = [">", "#", "$", "%"]
+                for cmd in commands:
+                    output = telnet.send_cmd(cmd, wait_for=prompts, wait_time=1.0)
+                    results.append({"command": cmd, "response": output})
+
+            return {
+                "status": "success",
+                "node_name": console_info.get("name"),
+                "results": results,
+            }
+        finally:
+            telnet.close()
+
+    except Exception as e:
+        logger.error(f"Failed to send console commands: {e}")
+        return {"status": "error", "error": str(e)}
+
 
 @mcp.tool
 async def gns3_send_console_commands(
@@ -768,11 +847,11 @@ async def gns3_send_console_commands(
     boot_timeout: int = 120,
     enter_config_mode: bool = False,
     save_config: bool = False,
-    enable_password: Optional[str] = None
+    enable_password: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Send commands to a node's console via Telnet.
-    
+
     Args:
         commands: List of commands to execute
         wait_for_boot: Wait for device to boot before sending commands
@@ -781,58 +860,19 @@ async def gns3_send_console_commands(
         save_config: Save configuration after commands (Cisco)
         enable_password: Enable password if required
     """
-    try:
-        client = create_client(server_url, username, password)
-        
-        # Get console info
-        console_info = await client.get_node_console_info(project_id, node_id)
-        host = console_info.get("host")
-        port = console_info.get("port")
-        
-        if not host or not port:
-            return {"status": "error", "error": "Node has no console or is not running"}
-        
-        # Connect via telnet
-        telnet = TelnetClient(host, port, timeout=30.0)
-        if not telnet.connect():
-            return {"status": "error", "error": f"Failed to connect to console {host}:{port}"}
-        
-        try:
-            # Wait for boot if requested
-            if wait_for_boot:
-                if not telnet.wait_for_boot(timeout=boot_timeout):
-                    return {"status": "error", "error": "Timeout waiting for device boot"}
-            
-            # Use enhanced config command sending if needed
-            if enter_config_mode:
-                outputs = telnet.send_config_commands(
-                    commands,
-                    enter_config=True,
-                    save_config=save_config,
-                    enable_password=enable_password
-                )
-                results = [{"command": cmd, "response": output} 
-                          for cmd, output in zip(commands, outputs)]
-            else:
-                # Send commands one by one
-                results = []
-                prompts = [">", "#", "$", "%"]
-                for cmd in commands:
-                    output = telnet.send_cmd(cmd, wait_for=prompts, wait_time=1.0)
-                    results.append({"command": cmd, "response": output})
-            
-            return {
-                "status": "success",
-                "node_name": console_info.get("name"),
-                "results": results
-            }
-        finally:
-            telnet.close()
-            
-    except Exception as e:
-        logger.error(f"Failed to send console commands: {e}")
-        return {"status": "error", "error": str(e)}
-
+    return await _send_console_commands_impl(
+        project_id=project_id,
+        node_id=node_id,
+        commands=commands,
+        server_url=server_url,
+        username=username,
+        password=password,
+        wait_for_boot=wait_for_boot,
+        boot_timeout=boot_timeout,
+        enter_config_mode=enter_config_mode,
+        save_config=save_config,
+        enable_password=enable_password,
+    )
 
 @mcp.tool
 async def gns3_get_node_config(
@@ -899,83 +939,73 @@ async def gns3_apply_config_template(
 ) -> Dict[str, Any]:
     """
     Apply a pre-built configuration template to a device.
-    
+
     Supported templates:
-    - "basic_router": Basic router setup (hostname, domain)
-    - "interface": Configure interface with IP
-    - "ospf": Configure OSPF routing
-    - "eigrp": Configure EIGRP routing
-    - "bgp": Configure BGP routing
-    - "static_route": Add static route
-    - "vlan": Create VLAN
-    - "trunk_port": Configure trunk port
-    - "access_port": Configure access port
-    - "dhcp_pool": Configure DHCP server
-    - "nat_overload": Configure NAT/PAT
-    - "ssh": Configure SSH access
-    
-    Args:
-        template_name: Name of configuration template
-        template_params: Parameters for the template (varies by template)
-        save_config: Save configuration after applying
+    - basic_router, interface, ospf, eigrp, bgp, static_route, default_route
+    - vlan, trunk_port, access_port
+    - dhcp_pool, nat_overload, ssh
+    - banner, ntp, logging, snmp
+    - standard_acl, extended_acl, security_hardening, qos_marking
+    - vpcs_basic, vpcs_dhcp
     """
     try:
-        # Generate commands based on template
-        commands = []
-        
+        commands: List[str] = []
+
         if template_name == "basic_router":
             commands = ConfigTemplates.basic_router_config(
                 template_params["hostname"],
-                template_params.get("domain", "local")
+                template_params.get("domain", "local"),
             )
         elif template_name == "interface":
             commands = ConfigTemplates.interface_config(
                 template_params["interface"],
                 template_params["ip_address"],
                 template_params["subnet_mask"],
-                template_params.get("description")
+                template_params.get("description"),
             )
         elif template_name == "ospf":
             commands = ConfigTemplates.ospf_config(
                 template_params["process_id"],
                 template_params["router_id"],
-                template_params["networks"]
+                template_params["networks"],
             )
         elif template_name == "eigrp":
             commands = ConfigTemplates.eigrp_config(
                 template_params["as_number"],
                 template_params["networks"],
-                template_params.get("router_id")
+                template_params.get("router_id"),
             )
         elif template_name == "bgp":
             commands = ConfigTemplates.bgp_config(
                 template_params["as_number"],
                 template_params["router_id"],
-                template_params["neighbors"]
+                template_params["neighbors"],
             )
         elif template_name == "static_route":
             commands = ConfigTemplates.static_route(
                 template_params["network"],
                 template_params["mask"],
                 template_params["next_hop"],
-                template_params.get("admin_distance")
+                template_params.get("admin_distance"),
             )
+        elif template_name == "default_route":
+            commands = ConfigTemplates.default_route(template_params["next_hop"])
         elif template_name == "vlan":
             commands = ConfigTemplates.vlan_config(
                 template_params["vlan_id"],
-                template_params["name"]
+                template_params["name"],
             )
         elif template_name == "trunk_port":
             commands = ConfigTemplates.trunk_port_config(
                 template_params["interface"],
-                template_params.get("allowed_vlans")
+                template_params.get("allowed_vlans"),
             )
         elif template_name == "access_port":
             commands = ConfigTemplates.access_port_config(
                 template_params["interface"],
                 template_params["vlan"],
                 template_params.get("portfast", True),
-                template_params.get("bpduguard", True)
+                template_params.get("bpduguard", True),
             )
         elif template_name == "dhcp_pool":
             commands = ConfigTemplates.dhcp_pool_config(
@@ -984,14 +1014,14 @@ async def gns3_apply_config_template(
                 template_params["mask"],
                 template_params["default_router"],
                 template_params.get("dns_servers"),
-                template_params.get("excluded_addresses")
+                template_params.get("excluded_addresses"),
             )
         elif template_name == "nat_overload":
             commands = ConfigTemplates.nat_overload_config(
                 template_params["inside_interfaces"],
                 template_params["outside_interface"],
                 template_params["acl_number"],
-                template_params["allowed_networks"]
+                template_params["allowed_networks"],
             )
         elif template_name == "ssh":
             commands = ConfigTemplates.ssh_config(
@@ -999,13 +1029,77 @@ async def gns3_apply_config_template(
                 template_params["username"],
                 template_params["password"],
                 template_params.get("crypto_key_size", 1024),
-                template_params.get("vty_lines", "0 4")
+                template_params.get("vty_lines", "0 4"),
+            )
+        elif template_name == "banner":
+            commands = ConfigTemplates.banner_config(
+                template_params.get("banner_type", "motd"),
+                template_params["message"],
+            )
+        elif template_name == "ntp":
+            commands = ConfigTemplates.ntp_config(template_params["ntp_servers"])
+        elif template_name == "logging":
+            commands = ConfigTemplates.logging_config(
+                template_params["syslog_server"],
+                template_params.get("trap_level", "informational"),
+            )
+        elif template_name == "snmp":
+            commands = ConfigTemplates.snmp_config(
+                template_params["community"],
+                template_params.get("access", "ro"),
+                template_params.get("acl"),
+            )
+        elif template_name == "standard_acl":
+            commands = ConfigTemplates.standard_acl(
+                template_params["acl_number"],
+                template_params["entries"],
+            )
+        elif template_name == "extended_acl":
+            commands = ConfigTemplates.extended_acl(
+                template_params["acl_number"],
+                template_params["entries"],
+            )
+        elif template_name == "security_hardening":
+            commands = ConfigTemplates.security_hardening_basic()
+        elif template_name == "qos_marking":
+            commands = ConfigTemplates.qos_basic_marking(
+                template_params["class_name"],
+                template_params["dscp_value"],
+                template_params["interfaces"],
+            )
+        elif template_name == "vpcs_basic":
+            # VPCS uses a single command string, not config mode
+            cmd = ConfigTemplates.vpcs_basic_config(
+                template_params["ip_address"],
+                template_params["subnet_mask"],
+                template_params["gateway"],
+            )
+            return await _send_console_commands_impl(
+                project_id=project_id,
+                node_id=node_id,
+                commands=[cmd],
+                server_url=server_url,
+                username=username,
+                password=password,
+                enter_config_mode=False,
+                save_config=False,
+            )
+        elif template_name == "vpcs_dhcp":
+            cmd = ConfigTemplates.vpcs_dhcp_config()
+            return await _send_console_commands_impl(
+                project_id=project_id,
+                node_id=node_id,
+                commands=[cmd],
+                server_url=server_url,
+                username=username,
+                password=password,
+                enter_config_mode=False,
+                save_config=False,
             )
         else:
             return {"status": "error", "error": f"Unknown template: {template_name}"}
-        
-        # Apply configuration
-        result = await gns3_send_console_commands(
+
+        result = await _send_console_commands_impl(
             project_id=project_id,
             node_id=node_id,
             commands=commands,
@@ -1013,15 +1107,15 @@ async def gns3_apply_config_template(
             username=username,
             password=password,
             enter_config_mode=True,
-            save_config=save_config
+            save_config=save_config,
         )
-        
-        if result["status"] == "success":
+
+        if result.get("status") == "success":
             result["template_applied"] = template_name
             result["commands_sent"] = commands
-        
+
         return result
-        
+
     except Exception as e:
         logger.error(f"Failed to apply config template: {e}")
         return {"status": "error", "error": str(e)}
@@ -1348,7 +1442,7 @@ async def gns3_bulk_configure_nodes(
         results = []
         
         for config in configurations:
-            result = await gns3_send_console_commands(
+            result = await _send_console_commands_impl(
                 project_id=project_id,
                 node_id=config["node_id"],
                 commands=config["commands"],
@@ -1356,7 +1450,7 @@ async def gns3_bulk_configure_nodes(
                 username=username,
                 password=password,
                 enter_config_mode=config.get("enter_config_mode", True),
-                save_config=config.get("save_config", False)
+                save_config=config.get("save_config", False),
             )
             results.append({
                 "node_id": config["node_id"],
@@ -1434,6 +1528,166 @@ async def gns3_validate_topology(
         }
     except Exception as e:
         logger.error(f"Failed to validate topology: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+
+# ==================== PROJECT SAVE / EXPORT ====================
+
+@mcp.tool
+async def gns3_save_project(
+    project_id: str,
+    snapshot_name: Optional[str] = None,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Checkpoint a project. GNS3 has no discrete 'save' RPC; this fetches current
+    project status and optionally creates a named snapshot.
+    """
+    try:
+        client = create_client(server_url, username, password)
+        project = await client.get_project(project_id)
+        snapshot = None
+        if snapshot_name:
+            snapshot = await client.create_snapshot(project_id, snapshot_name)
+        return {
+            "status": "success",
+            "project": {
+                "project_id": project.get("project_id"),
+                "name": project.get("name"),
+                "project_status": project.get("status"),
+                "filename": project.get("filename"),
+                "path": project.get("path"),
+            },
+            "snapshot": snapshot,
+            "message": (
+                f"Project checkpointed with snapshot '{snapshot_name}'"
+                if snapshot_name
+                else "Project status retrieved (GNS3 auto-persists project files)"
+            ),
+        }
+    except Exception as e:
+        logger.error(f"Failed to save project: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_export_project(
+    project_id: str,
+    output_path: str,
+    include_images: bool = False,
+    include_snapshots: bool = False,
+    reset_mac_addresses: bool = False,
+    keep_compute_ids: bool = False,
+    compression: str = "zip",
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Export a project as a portable .gns3project archive to a local path.
+
+    Args:
+        output_path: Destination file path (e.g. /tmp/lab.gns3project)
+        include_images: Bundle device images into the archive
+        include_snapshots: Include snapshots
+        compression: zip | none | bzip2 | lzma
+    """
+    try:
+        client = create_client(server_url, username, password)
+        result = await client.export_project(
+            project_id=project_id,
+            output_path=output_path,
+            include_images=include_images,
+            include_snapshots=include_snapshots,
+            reset_mac_addresses=reset_mac_addresses,
+            keep_compute_ids=keep_compute_ids,
+            compression=compression,
+        )
+        return {"status": "success", "export": result}
+    except Exception as e:
+        logger.error(f"Failed to export project: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== IMAGE MANAGEMENT ====================
+
+@mcp.tool
+async def gns3_list_images(
+    emulator: str = "qemu",
+    compute_id: str = "local",
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    List device images available on a GNS3 compute for an emulator type.
+
+    Args:
+        emulator: qemu | dynamips | iou | docker
+        compute_id: Compute id (default 'local')
+    """
+    try:
+        client = create_client(server_url, username, password)
+        images = await client.list_images(compute_id=compute_id, emulator=emulator)
+        return {
+            "status": "success",
+            "compute_id": compute_id,
+            "emulator": emulator,
+            "images": images,
+            "total": len(images) if isinstance(images, list) else 0,
+        }
+    except Exception as e:
+        logger.error(f"Failed to list images: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool
+async def gns3_import_image(
+    source_path: str,
+    emulator: str = "qemu",
+    filename: Optional[str] = None,
+    compute_id: str = "local",
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Import (upload) a local device image file into the GNS3 compute image store.
+
+    Args:
+        source_path: Local filesystem path to the image (.qcow2, .img, .bin, .image, ...)
+        emulator: Target emulator store: qemu | dynamips | iou
+        filename: Remote filename (defaults to basename of source_path)
+        compute_id: Compute id (default 'local')
+
+    Note: docker images are managed by Docker itself; use qemu/dynamips/iou here.
+    """
+    try:
+        if emulator.lower() == "docker":
+            return {
+                "status": "error",
+                "error": "Docker images are managed by Docker (pull/load), not GNS3 image upload. Use emulator=qemu|dynamips|iou.",
+            }
+        from pathlib import Path
+
+        path = Path(source_path)
+        if not path.is_file():
+            return {"status": "error", "error": f"Image file not found: {source_path}"}
+
+        remote_name = filename or path.name
+        client = create_client(server_url, username, password)
+        result = await client.upload_image(
+            compute_id=compute_id,
+            emulator=emulator,
+            filename=remote_name,
+            source_path=str(path),
+        )
+        return {"status": "success", "import": result}
+    except Exception as e:
+        logger.error(f"Failed to import image: {e}")
         return {"status": "error", "error": str(e)}
 
 
