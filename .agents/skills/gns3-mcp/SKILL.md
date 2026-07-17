@@ -33,9 +33,14 @@ Load and follow this skill for any of:
    - Editing `gns3-mcp-server` source when the **task is developing the MCP server** (tests of the server are fine; still do not drive a live lab around MCP tools)
 4. **IDs are provenance-only.** `project_id`, `node_id`, `link_id`, `template_id`, `snapshot_id`, adapter/port numbers, and similar must come from a prior MCP result in this session or from the user. Never invent UUIDs. User says “R1” → `gns3_list_nodes` (or topology) and match by name before acting. Refresh with list/get tools if state may be stale. For links, take adapter/port from `gns3_get_node` when needed.
 5. **Session open.** The first GNS3 action in a conversation is `gns3_ensure_server`. Later GNS3 calls may skip a separate ensure.
-6. **Secrets.** Use env / host MCP config. Document variable **names** only. Never print `GNS3_PASSWORD`, console passwords, or SSH passwords. Never commit secrets into skill or repo files. Examples use placeholders only.
-7. **Destructive ops.**
-   - Confirm with the user before: `gns3_delete_project`, `gns3_restore_snapshot`, `gns3_export_project`
+6. **Session close (ask first).** When GNS3 lab work for the turn/session is **complete**, **before** ending:
+   1. Ask whether to **close the current project** (`gns3_close_project` or `gns3_cleanup_session(close_project=true, …)`).
+   2. Ask whether to **stop the GNS3 server** (`gns3_stop_server` or `gns3_cleanup_session(stop_server=true, …)`).
+   3. Execute **only** the actions the user accepts, via MCP. Defaults on cleanup flags are all false — never invent consent.
+   4. Do **not** auto-close projects or stop the server without an explicit yes in this conversation.
+7. **Secrets.** Use env / host MCP config. Document variable **names** only. Never print `GNS3_PASSWORD`, console passwords, or SSH passwords. Never commit secrets into skill or repo files. Examples use placeholders only.
+8. **Destructive ops.**
+   - Confirm with the user before: `gns3_delete_project`, `gns3_restore_snapshot`, `gns3_export_project`, and (via session close) `gns3_stop_server` / closing a project the user did not just request to close
    - Node/link delete is OK when the user asked for that topology change
    - Before `gns3_restore_snapshot`, create a safety snapshot when possible
 
@@ -59,8 +64,10 @@ Use this spine for topology work:
 4. Mutate via MCP (`gns3_add_node`, `gns3_add_link`, start/stop, configure, …)
 5. `gns3_validate_topology` when the shape should be checked
 6. Optional: `gns3_create_snapshot` / `gns3_save_project`
+7. **On completion:** ask close project? ask stop server? → MCP only after yes
+   (`gns3_cleanup_session` with explicit flags, or discrete close/stop tools)
 
-Completion criterion for a lab change: every intended node/link/config step was done with MCP tools (or an explicit allowed escape), and IDs used were resolved—not guessed.
+Completion criterion for a lab change: every intended node/link/config step was done with MCP tools (or an explicit allowed escape), IDs used were resolved—not guessed, and session-close questions were asked (even if the user declines both).
 
 ## Configure preference
 
@@ -95,3 +102,4 @@ Never reimplement a tool because the host prefix looks different. Discover the b
 - Guessing a `project_id` from memory or a previous chat
 - Running `examples/example_complete_network.py` to build the user’s lab
 - Printing API passwords from `.omp/mcp.json` into the transcript
+- Stopping gns3server or closing a project without asking after lab work

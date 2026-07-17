@@ -5,8 +5,8 @@
   "command": "run-omp.sh",
   "args": [],
   "env": {},
-  "description": "Complete GNS3 integration via MCP tools only. Prefer these gns3_* tools over raw REST, curl, telnet, SSH, or Python scripts against GNS3. Ensures localhost gns3server, manages topologies, console (optional login), and guest SSH (gns3_ssh_exec). Pair with the gns3-mcp agent skill for hard MCP-first rules.",
-  "description_for_agent": "GNS3 MCP server. ALWAYS use these tools for GNS3 lab ops; NEVER reimplement via httpx/requests/curl to :3080, raw telnet/SSH, or ad-hoc Python. Tools: gns3_ensure_server (call first each session), projects/nodes/links, gns3_send_console_commands (login_username/login_password), gns3_ssh_exec, images, snapshots, templates list, config templates. Resolve IDs from tool results only. Load skill gns3-mcp for playbooks and the escape ritual when a tool is missing.",
+  "description": "Complete GNS3 integration via MCP tools only. Prefer these gns3_* tools over raw REST, curl, telnet, SSH, or Python scripts against GNS3. Ensures/stops localhost gns3server, manages topologies, console (optional login), guest SSH (gns3_ssh_exec), and session cleanup (gns3_cleanup_session). Pair with the gns3-mcp agent skill for hard MCP-first rules and ask-before-cleanup.",
+  "description_for_agent": "GNS3 MCP server. ALWAYS use these tools for GNS3 lab ops; NEVER reimplement via httpx/requests/curl to :3080, raw telnet/SSH, or ad-hoc Python. Tools: gns3_ensure_server (call first each session), gns3_stop_server / gns3_cleanup_session (after work: ASK user before close project or stop server), projects/nodes/links, gns3_send_console_commands (login_username/login_password), gns3_ssh_exec, images, snapshots, templates list, config templates. Resolve IDs from tool results only. Load skill gns3-mcp for playbooks and the escape ritual when a tool is missing.",
   "user_params": {
     "args": {},
     "env": {
@@ -33,6 +33,10 @@
       "GNS3_SERVER_START_TIMEOUT": {
         "required": false,
         "description": "Seconds to wait for GNS3 after auto-start (default 30)."
+      },
+      "GNS3_SERVER_STOP_TIMEOUT": {
+        "required": false,
+        "description": "Seconds to wait after SIGTERM before SIGKILL when stopping localhost gns3server (default 10)."
       },
       "GNS3_SERVER_HEALTHY_CACHE_SECONDS": {
         "required": false,

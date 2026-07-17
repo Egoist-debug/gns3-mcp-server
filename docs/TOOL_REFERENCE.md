@@ -13,7 +13,7 @@ gemini mcp add gns3 "path/to/gns3-mcp-server3/run.bat"
 
 ## 📚 Available Tools (40+ Tools)
 
-### 🖥️ Server & Compute Management (3 tools)
+### 🖥️ Server & Compute Management (5 tools)
 
 #### `gns3_ensure_server`
 Probe the GNS3 server and auto-start it when the target is **localhost**.
@@ -37,6 +37,53 @@ Returns:
 Env:
   GNS3_SERVER_URL, GNS3_SERVER_START_CMD, GNS3_SERVER_START_TIMEOUT,
   GNS3_SERVER_HEALTHY_CACHE_SECONDS
+```
+
+#### `gns3_stop_server`
+Stop a **localhost** GNS3 server process listening on the URL port.
+```
+Args:
+  - server_url: GNS3 REST base URL (port used for PID discovery)
+  - username/password: Unused (signature consistency only)
+
+Behavior:
+  - Discover TCP LISTEN PIDs on the URL port (ss → fuser → lsof)
+  - SIGTERM all PIDs, wait (default 10s, GNS3_SERVER_STOP_TIMEOUT), then SIGKILL survivors
+  - Remote URLs are refused (never killed over the network)
+  - No listen PIDs → already_stopped success
+  - Clears healthy cache for the URL
+
+Returns:
+  status, server_url, stopped, already_stopped, pids, signal_steps,
+  wait_seconds, error?
+
+Env:
+  GNS3_SERVER_STOP_TIMEOUT
+```
+
+#### `gns3_cleanup_session`
+Optional multi-step lab cleanup. All flags default **false** (inert until set).
+```
+Args:
+  - project_id: Optional; required for node/project steps
+  - stop_nodes: Stop all nodes in the project (default false)
+  - close_project: Close project (default false)
+  - stop_server: Stop localhost gns3server (default false)
+  - server_url / username / password: Standard API connection args
+
+Order (when flags true):
+  1. stop_nodes
+  2. close_project
+  3. stop_server
+
+Rules:
+  - Missing project_id with stop_nodes/close_project → that step skipped
+  - Step failure is recorded; later steps still run
+  - stop_server-only path does NOT call ensure (avoids restart-then-kill)
+  - Does not delete projects
+
+Returns:
+  status (success|partial|error), server_url, project_id, steps[]
 ```
 
 #### `gns3_get_server_info`

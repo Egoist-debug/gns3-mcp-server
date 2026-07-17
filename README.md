@@ -91,6 +91,7 @@ Every GNS3-backed tool probes the server first. If the URL is **localhost** and 
 | `GNS3_SERVER_START_CMD` | Full start command; custom values are not rewritten |
 | `GNS3_SERVER_START_TIMEOUT` | Wait budget seconds (default `30`) |
 | `GNS3_SERVER_HEALTHY_CACHE_SECONDS` | Skip re-probe window (default `30`) |
+| `GNS3_SERVER_STOP_TIMEOUT` | Stop wait before SIGKILL seconds (default `10`) |
 | `GNS3_USERNAME` / `GNS3_PASSWORD` | GNS3 API auth |
 | `GNS3_CONSOLE_USER` / `GNS3_CONSOLE_PASSWORD` | Default console login for `gns3_send_console_commands` |
 | `GNS3_CONSOLE_READY_TIMEOUT` | Console login readiness budget seconds (default `30`) |
@@ -99,7 +100,7 @@ Every GNS3-backed tool probes the server first. If the URL is **localhost** and 
 | `GNS3_SSH_HOST_KEY_POLICY` | `accept_new` (default) / `strict` / `warn` |
 | `GNS3_SSH_CONNECT_TIMEOUT` | SSH connect readiness budget with retries (default `30`) |
 
-Explicit tool: `gns3_ensure_server`. Guest login uses `login_username`/`login_password` (console) or `ssh_username`/`ssh_password` (SSH) — **not** the API `username`/`password` fields. Console output is line-prompt complete, cleaned, and auto-paged; SSH retries transient connect failures within the budget.
+Explicit tools: `gns3_ensure_server`, `gns3_stop_server`, `gns3_cleanup_session`. Guest login uses `login_username`/`login_password` (console) or `ssh_username`/`ssh_password` (SSH) — **not** the API `username`/`password` fields. Console output is line-prompt complete, cleaned, and auto-paged; SSH retries transient connect failures within the budget. After lab work, agents should **ask** before close project / stop server.
 
 
 **🎉 That's it! You're now ready for AI-powered network engineering!**
@@ -113,8 +114,10 @@ See [docs/TOOL_REFERENCE.md](docs/TOOL_REFERENCE.md) for complete documentation 
 
 ### **🔧 Key Tool Categories**
 
-#### **Server & Compute Management (3 tools)**
+#### **Server & Compute Management (5 tools)**
 - `gns3_ensure_server` - Probe GNS3 and auto-start localhost if needed
+- `gns3_stop_server` - Stop localhost gns3server (port → SIGTERM → SIGKILL)
+- `gns3_cleanup_session` - Optional stop_nodes / close_project / stop_server
 - `gns3_get_server_info` - Get GNS3 server version and information
 - `gns3_list_computes` - List all available compute servers
 

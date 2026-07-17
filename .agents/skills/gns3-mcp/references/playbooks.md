@@ -131,3 +131,23 @@ MCP does **not** yet expose create/update template tools (see `capability-matrix
 6. **Delete project:** confirm first → `gns3_delete_project`
 
 **Done when:** Snapshot list reflects the request; restore only after confirm (+ safety snap when possible).
+
+---
+
+## 8. Session cleanup (ask first)
+
+**Goal:** End lab work without leaving open projects or a local gns3server running **unless the user wants them**.
+
+1. Confirm the lab goal for this turn is done (topology/config/verify complete).
+2. **Ask the user** two questions (can be one message):
+   - Close the current project?
+   - Stop the GNS3 server?
+3. Only after explicit answers, act via MCP:
+   - Close only: `gns3_close_project(project_id)` **or** `gns3_cleanup_session(project_id=…, close_project=true)`
+   - Stop server only: `gns3_stop_server` **or** `gns3_cleanup_session(stop_server=true)`  
+     (stop-server-only must not go through ensure — cleanup tool already avoids restart)
+   - Both / plus stop nodes: `gns3_cleanup_session(project_id=…, stop_nodes=?, close_project=?, stop_server=?)` with flags matching consent
+4. Remote `server_url`: stop_server is refused by the tool — report that; only close_project may apply.
+5. Never delete the project as part of “cleanup” unless the user separately confirmed `gns3_delete_project`.
+
+**Done when:** User was asked; accepted actions ran via MCP; declines are respected with no silent close/stop.

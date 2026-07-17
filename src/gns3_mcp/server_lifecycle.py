@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shlex
+import signal
+import subprocess
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
@@ -22,6 +25,7 @@ DEFAULT_START_CMD = "gns3server"
 DEFAULT_START_TIMEOUT = 30.0
 DEFAULT_HEALTHY_CACHE_SECONDS = 30.0
 DEFAULT_PROBE_TIMEOUT = 3.0
+DEFAULT_STOP_TIMEOUT = 10.0
 
 _lock = asyncio.Lock()
 # url -> (monotonic_ts, server_info)
@@ -145,9 +149,241 @@ def _cache_set(server_url: str, info: Any) -> None:
     _healthy_cache[normalize_server_url(server_url)] = (time.monotonic(), info)
 
 
-def clear_healthy_cache() -> None:
-    """Test helper: drop the process-wide healthy cache."""
-    _healthy_cache.clear()
+def clear_healthy_cache(server_url: Optional[str] = None) -> None:
+    """Drop healthy cache for one URL, or the whole process cache when None."""
+    if server_url is None:
+        _healthy_cache.clear()
+        return
+    _healthy_cache.pop(normalize_server_url(server_url), None)
+
+
+def _stop_timeout() -> float:
+    return _env_float("GNS3_SERVER_STOP_TIMEOUT", DEFAULT_STOP_TIMEOUT)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if *pid* exists (and is killable by this user)."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but we cannot signal it.
+        return True
+    except OSError:
+        return False
+
+
+def _parse_ss_pids(ss_output: str) -> List[int]:
+    """Extract unique PIDs from ``ss -lptn`` users fields (``pid=123,``)."""
+    pids: List[int] = []
+    seen: set[int] = set()
+    for match in re.finditer(r"pid=(\d+)", ss_output or ""):
+        pid = int(match.group(1))
+        if pid not in seen:
+            seen.add(pid)
+            pids.append(pid)
+    return pids
+
+
+def _pids_listening_on_port(port: int) -> List[int]:
+    """Return PIDs with a TCP LISTEN socket on *port* (local machine).
+
+    Prefers ``ss``; falls back to ``fuser`` then ``lsof``.
+    """
+    # ss: parse users:(("gns3server",pid=123,fd=...))
+    try:
+        proc = subprocess.run(
+            ["ss", "-lptn", f"sport = :{port}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if proc.returncode == 0 or proc.stdout:
+            pids = _parse_ss_pids(proc.stdout)
+            if pids:
+                return pids
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+        logger.debug("ss listen lookup failed: %s", e)
+
+    # fuser -n tcp PORT → "PORT/tcp:  123 456"
+    try:
+        proc = subprocess.run(
+            ["fuser", "-n", "tcp", str(port)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        # fuser writes PIDs to stderr on many distros
+        blob = f"{proc.stdout or ''} {proc.stderr or ''}"
+        pids = [int(x) for x in re.findall(r"\b(\d+)\b", blob)]
+        # Drop the port number itself if present as a token
+        pids = [p for p in pids if p != port and p > 0]
+        # unique preserve order
+        out: List[int] = []
+        seen: set[int] = set()
+        for p in pids:
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+        if out:
+            return out
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+        logger.debug("fuser listen lookup failed: %s", e)
+
+    try:
+        proc = subprocess.run(
+            ["lsof", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        out = []
+        seen = set()
+        for line in (proc.stdout or "").splitlines():
+            line = line.strip()
+            if not line.isdigit():
+                continue
+            pid = int(line)
+            if pid not in seen:
+                seen.add(pid)
+                out.append(pid)
+        return out
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+        logger.debug("lsof listen lookup failed: %s", e)
+
+    return []
+
+
+def _signal_pid(pid: int, sig: signal.Signals) -> str:
+    """Send *sig* to *pid*. Returns exited|signaled|gone|error:..."""
+    if not _pid_alive(pid):
+        return "gone"
+    try:
+        os.kill(pid, sig)
+        return "signaled"
+    except ProcessLookupError:
+        return "gone"
+    except PermissionError as e:
+        return f"error:permission:{e}"
+    except OSError as e:
+        return f"error:{e}"
+
+
+async def stop_gns3_server(
+    server_url: Optional[str] = None,
+    *,
+    stop_timeout: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Stop a **localhost** GNS3 server listening on *server_url*'s port.
+
+    Strategy: discover TCP LISTEN PIDs on the port → SIGTERM → wait → SIGKILL.
+    Remote URLs are refused. Clears the healthy cache for the URL.
+    """
+    url = normalize_server_url(server_url)
+    timeout = float(stop_timeout) if stop_timeout is not None else _stop_timeout()
+    t0 = time.monotonic()
+    signal_steps: List[Dict[str, Any]] = []
+
+    if not is_local_server_url(url):
+        return {
+            "status": "error",
+            "server_url": url,
+            "stopped": False,
+            "already_stopped": False,
+            "pids": [],
+            "signal_steps": [],
+            "wait_seconds": round(time.monotonic() - t0, 3),
+            "error": (
+                f"Refusing to stop remote GNS3 server at {url}. "
+                "Only localhost / 127.0.0.1 / ::1 may be stopped via MCP."
+            ),
+        }
+
+    _, port = _parse_host_port(url)
+
+    async with _lock:
+        pids = _pids_listening_on_port(port)
+        if not pids:
+            clear_healthy_cache(url)
+            return {
+                "status": "success",
+                "server_url": url,
+                "stopped": False,
+                "already_stopped": True,
+                "pids": [],
+                "signal_steps": [],
+                "wait_seconds": round(time.monotonic() - t0, 3),
+            }
+
+        logger.warning(
+            "Stopping GNS3 server on port %s (pids=%s) for %s",
+            port,
+            pids,
+            url,
+        )
+
+        for pid in pids:
+            result = _signal_pid(pid, signal.SIGTERM)
+            signal_steps.append(
+                {"pid": pid, "signal": "SIGTERM", "result": result}
+            )
+
+        deadline = time.monotonic() + max(0.0, timeout)
+        while time.monotonic() < deadline:
+            if not any(_pid_alive(pid) for pid in pids):
+                break
+            await asyncio.sleep(0.2)
+
+        survivors = [pid for pid in pids if _pid_alive(pid)]
+        for pid in survivors:
+            result = _signal_pid(pid, signal.SIGKILL)
+            signal_steps.append(
+                {"pid": pid, "signal": "SIGKILL", "result": result}
+            )
+
+        # Brief grace after KILL
+        if survivors:
+            kill_deadline = time.monotonic() + min(2.0, max(0.5, timeout))
+            while time.monotonic() < kill_deadline:
+                if not any(_pid_alive(pid) for pid in pids):
+                    break
+                await asyncio.sleep(0.1)
+
+        still_alive = [pid for pid in pids if _pid_alive(pid)]
+        remaining_listen = _pids_listening_on_port(port)
+        clear_healthy_cache(url)
+
+        if still_alive or remaining_listen:
+            return {
+                "status": "error",
+                "server_url": url,
+                "stopped": False,
+                "already_stopped": False,
+                "pids": pids,
+                "signal_steps": signal_steps,
+                "wait_seconds": round(time.monotonic() - t0, 3),
+                "error": (
+                    f"GNS3 server on port {port} still present after TERM/KILL "
+                    f"(alive_pids={still_alive}, listen_pids={remaining_listen})."
+                ),
+            }
+
+        return {
+            "status": "success",
+            "server_url": url,
+            "stopped": True,
+            "already_stopped": False,
+            "pids": pids,
+            "signal_steps": signal_steps,
+            "wait_seconds": round(time.monotonic() - t0, 3),
+        }
 
 
 async def _spawn_server(argv: list[str]) -> Tuple[Optional[int], str]:

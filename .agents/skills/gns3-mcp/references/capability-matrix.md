@@ -15,6 +15,7 @@ Tool names below are canonical `gns3_*`. Apply host prefixes as needed.
 | Job | Primary tools |
 |-----|----------------|
 | Probe / auto-start local GNS3 | `gns3_ensure_server`, `gns3_get_server_info`, `gns3_list_computes` |
+| Stop local GNS3 server / session cleanup | `gns3_stop_server` (localhost port → SIGTERM→SIGKILL), `gns3_cleanup_session` (optional stop_nodes / close_project / stop_server; ask user first) |
 | Project lifecycle | `gns3_list_projects`, `gns3_create_project`, `gns3_get_project`, `gns3_update_project`, `gns3_open_project`, `gns3_close_project`, `gns3_duplicate_project`, `gns3_save_project` |
 | List / add / control nodes | `gns3_list_nodes`, `gns3_add_node`, `gns3_get_node`, `gns3_update_node`, `gns3_delete_node`, start/stop/suspend/reload/duplicate, start/stop all |
 | Links | `gns3_list_links`, `gns3_add_link`, `gns3_delete_link` |

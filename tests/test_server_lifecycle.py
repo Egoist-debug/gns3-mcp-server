@@ -1,18 +1,20 @@
-"""Unit tests for GNS3 server lifecycle (probe/auto-start)."""
+"""Unit tests for GNS3 server lifecycle (probe/auto-start/stop)."""
 
 from __future__ import annotations
 
-import asyncio
 import os
+import signal
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from gns3_mcp.server_lifecycle import (
+    _parse_ss_pids,
     build_start_command,
     clear_healthy_cache,
     ensure_gns3_server,
     is_local_server_url,
     normalize_server_url,
+    stop_gns3_server,
 )
 
 
@@ -134,6 +136,232 @@ class EnsureServerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["status"], "success")
             self.assertTrue(result["already_running"])
             spawn.assert_not_called()
+
+
+class ParseSsPidsTests(unittest.TestCase):
+    def test_extracts_unique_pids(self):
+        out = (
+            "State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n"
+            'LISTEN 0 100 127.0.0.1:3080 0.0.0.0:* users:(("gns3server",pid=4242,fd=6))\n'
+        )
+        self.assertEqual(_parse_ss_pids(out), [4242])
+
+    def test_empty(self):
+        self.assertEqual(_parse_ss_pids(""), [])
+
+
+class StopServerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        clear_healthy_cache()
+
+    async def test_remote_refused(self):
+        with patch(
+            "gns3_mcp.server_lifecycle._pids_listening_on_port",
+            return_value=[1],
+        ) as pids:
+            result = await stop_gns3_server("http://10.0.0.5:3080")
+            self.assertEqual(result["status"], "error")
+            self.assertIn("remote", result["error"].lower())
+            pids.assert_not_called()
+
+    async def test_already_stopped_no_pids(self):
+        with patch(
+            "gns3_mcp.server_lifecycle._pids_listening_on_port",
+            return_value=[],
+        ):
+            # seed cache then ensure clear
+            from gns3_mcp import server_lifecycle as sl
+
+            sl._cache_set("http://127.0.0.1:3080", {"version": "x"})
+            result = await stop_gns3_server("http://127.0.0.1:3080")
+            self.assertEqual(result["status"], "success")
+            self.assertTrue(result["already_stopped"])
+            self.assertFalse(result["stopped"])
+            self.assertIsNone(sl._cache_get("http://127.0.0.1:3080"))
+
+    async def test_term_then_exit(self):
+        alive = {99: True}
+
+        def pid_alive(pid):
+            return alive.get(pid, False)
+
+        def signal_pid(pid, sig):
+            if sig == signal.SIGTERM:
+                alive[pid] = False
+                return "signaled"
+            return "gone"
+
+        with patch(
+            "gns3_mcp.server_lifecycle._pids_listening_on_port",
+            side_effect=[[99], []],
+        ), patch(
+            "gns3_mcp.server_lifecycle._pid_alive",
+            side_effect=pid_alive,
+        ), patch(
+            "gns3_mcp.server_lifecycle._signal_pid",
+            side_effect=signal_pid,
+        ), patch(
+            "gns3_mcp.server_lifecycle.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            result = await stop_gns3_server(
+                "http://127.0.0.1:3080", stop_timeout=1.0
+            )
+            self.assertEqual(result["status"], "success")
+            self.assertTrue(result["stopped"])
+            self.assertEqual(result["pids"], [99])
+            self.assertTrue(
+                any(s.get("signal") == "SIGTERM" for s in result["signal_steps"])
+            )
+            self.assertFalse(
+                any(s.get("signal") == "SIGKILL" for s in result["signal_steps"])
+            )
+
+    async def test_term_then_kill(self):
+        # Stays alive until SIGKILL
+        state = {"term_sent": False, "kill_sent": False}
+
+        def pid_alive(pid):
+            if state["kill_sent"]:
+                return False
+            return True
+
+        def signal_pid(pid, sig):
+            if sig == signal.SIGTERM:
+                state["term_sent"] = True
+                return "signaled"
+            if sig == signal.SIGKILL:
+                state["kill_sent"] = True
+                return "signaled"
+            return "error"
+
+        listen_calls = {"n": 0}
+
+        def listen(_port):
+            listen_calls["n"] += 1
+            # first discovery has pid; post-kill listen empty
+            if state["kill_sent"]:
+                return []
+            return [77]
+
+        with patch(
+            "gns3_mcp.server_lifecycle._pids_listening_on_port",
+            side_effect=listen,
+        ), patch(
+            "gns3_mcp.server_lifecycle._pid_alive",
+            side_effect=pid_alive,
+        ), patch(
+            "gns3_mcp.server_lifecycle._signal_pid",
+            side_effect=signal_pid,
+        ), patch(
+            "gns3_mcp.server_lifecycle.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            result = await stop_gns3_server(
+                "http://127.0.0.1:3080", stop_timeout=0.0
+            )
+            self.assertEqual(result["status"], "success")
+            self.assertTrue(result["stopped"])
+            self.assertTrue(state["term_sent"])
+            self.assertTrue(state["kill_sent"])
+            self.assertTrue(
+                any(s.get("signal") == "SIGKILL" for s in result["signal_steps"])
+            )
+
+
+class CleanupSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_all_flags_false_success(self):
+        from gns3_mcp.server import gns3_cleanup_session
+
+        result = await gns3_cleanup_session.fn()
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(result["steps"]), 3)
+        self.assertTrue(all(s["status"] == "skipped" for s in result["steps"]))
+
+    async def test_missing_project_id_skipped(self):
+        from gns3_mcp.server import gns3_cleanup_session
+
+        with patch(
+            "gns3_mcp.server.stop_gns3_server",
+            new=AsyncMock(
+                return_value={
+                    "status": "success",
+                    "stopped": True,
+                    "already_stopped": False,
+                    "pids": [1],
+                    "signal_steps": [],
+                    "server_url": "http://localhost:3080",
+                    "wait_seconds": 0.1,
+                }
+            ),
+        ) as stop:
+            result = await gns3_cleanup_session.fn(
+                stop_nodes=True, close_project=True, stop_server=True
+            )
+            self.assertEqual(result["status"], "success")
+            by_step = {s["step"]: s for s in result["steps"]}
+            self.assertEqual(by_step["stop_nodes"]["status"], "skipped")
+            self.assertEqual(by_step["close_project"]["status"], "skipped")
+            self.assertEqual(by_step["stop_server"]["status"], "success")
+            stop.assert_awaited_once()
+
+    async def test_close_fail_still_stops_server(self):
+        from gns3_mcp.server import gns3_cleanup_session
+
+        mock_client = MagicMock()
+        mock_client.close_project = AsyncMock(side_effect=RuntimeError("close boom"))
+
+        with patch(
+            "gns3_mcp.server.create_client_ready",
+            new=AsyncMock(return_value=mock_client),
+        ), patch(
+            "gns3_mcp.server.stop_gns3_server",
+            new=AsyncMock(
+                return_value={
+                    "status": "success",
+                    "stopped": True,
+                    "already_stopped": False,
+                    "pids": [5],
+                    "signal_steps": [],
+                    "server_url": "http://localhost:3080",
+                    "wait_seconds": 0.2,
+                }
+            ),
+        ) as stop:
+            result = await gns3_cleanup_session.fn(
+                project_id="proj-1",
+                close_project=True,
+                stop_server=True,
+            )
+            self.assertEqual(result["status"], "partial")
+            by_step = {s["step"]: s for s in result["steps"]}
+            self.assertEqual(by_step["close_project"]["status"], "error")
+            self.assertEqual(by_step["stop_server"]["status"], "success")
+            stop.assert_awaited_once()
+
+    async def test_stop_only_does_not_ensure(self):
+        from gns3_mcp.server import gns3_cleanup_session
+
+        with patch(
+            "gns3_mcp.server.create_client_ready",
+            new=AsyncMock(),
+        ) as ready, patch(
+            "gns3_mcp.server.stop_gns3_server",
+            new=AsyncMock(
+                return_value={
+                    "status": "success",
+                    "stopped": False,
+                    "already_stopped": True,
+                    "pids": [],
+                    "signal_steps": [],
+                    "server_url": "http://localhost:3080",
+                    "wait_seconds": 0,
+                }
+            ),
+        ):
+            result = await gns3_cleanup_session.fn(stop_server=True)
+            self.assertEqual(result["status"], "success")
+            ready.assert_not_called()
 
 
 if __name__ == "__main__":

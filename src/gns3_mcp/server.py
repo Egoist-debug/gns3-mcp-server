@@ -19,7 +19,7 @@ from fastmcp import FastMCP
 from .gns3_client import GNS3APIClient, GNS3Config
 from .telnet_client import TelnetClient
 from .config_templates import ConfigTemplates, TopologyTemplates
-from .server_lifecycle import ensure_gns3_server, normalize_server_url
+from .server_lifecycle import ensure_gns3_server, normalize_server_url, stop_gns3_server
 from . import ssh_client as ssh_helpers
 
 # Keep MCP stdio clean: default WARNING unless GNS3_MCP_DEBUG is set.
@@ -119,6 +119,187 @@ async def gns3_ensure_server(
             "wait_seconds": 0,
             "error": str(e),
         }
+
+@mcp.tool
+async def gns3_stop_server(
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Stop a **localhost** GNS3 server by terminating the process listening on
+    the URL port (SIGTERM, then SIGKILL after timeout).
+
+    Remote server URLs are refused (never killed over the network).
+    Clears the healthy cache so a later ``gns3_ensure_server`` re-probes.
+
+    Args:
+        server_url: GNS3 REST base URL (port used for PID discovery)
+        username: Unused; kept for signature consistency with other tools
+        password: Unused; kept for signature consistency with other tools
+    """
+    del username, password  # API auth not used for local process stop
+    try:
+        return await stop_gns3_server(server_url)
+    except Exception as e:
+        logger.error(f"Failed to stop GNS3 server: {e}")
+        return {
+            "status": "error",
+            "server_url": normalize_server_url(server_url),
+            "stopped": False,
+            "already_stopped": False,
+            "pids": [],
+            "signal_steps": [],
+            "wait_seconds": 0,
+            "error": str(e),
+        }
+
+
+@mcp.tool
+async def gns3_cleanup_session(
+    project_id: Optional[str] = None,
+    stop_nodes: bool = False,
+    close_project: bool = False,
+    stop_server: bool = False,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Optional multi-step lab session cleanup (defaults all false — safe/inert).
+
+    Fixed order when flags are true:
+      1. stop_nodes  — stop all nodes in project_id
+      2. close_project — close project (stops nodes)
+      3. stop_server — stop localhost gns3server on server_url port
+
+    Missing project_id with stop_nodes/close_project true → that step skipped.
+    A step failure is recorded and later steps still run.
+    Does **not** delete projects. Prefer asking the user before enabling flags.
+
+    Args:
+        project_id: Project for node/project steps (optional if only stop_server)
+        stop_nodes: Stop all nodes in the project
+        close_project: Close the project
+        stop_server: Stop the local GNS3 server process
+        server_url: GNS3 REST base URL
+        username: Optional GNS3 API username
+        password: Optional GNS3 API password
+    """
+    url = normalize_server_url(server_url)
+    steps: List[Dict[str, Any]] = []
+
+    def _append(step: str, status: str, **detail: Any) -> None:
+        entry: Dict[str, Any] = {"step": step, "status": status}
+        entry.update(detail)
+        steps.append(entry)
+
+    # --- stop_nodes ---
+    if not stop_nodes:
+        _append("stop_nodes", "skipped", reason="stop_nodes=false")
+    elif not project_id:
+        _append("stop_nodes", "skipped", reason="project_id required")
+    else:
+        try:
+            client = await create_client_ready(server_url, username, password)
+            nodes = await client.get_project_nodes(project_id)
+            stopped: List[Dict[str, Any]] = []
+            failed: List[Dict[str, Any]] = []
+            for node in nodes:
+                nid = node.get("node_id")
+                name = node.get("name")
+                try:
+                    await client.stop_node(project_id, nid)
+                    stopped.append({"node_id": nid, "name": name})
+                except Exception as e:
+                    failed.append({"node_id": nid, "name": name, "error": str(e)})
+            if failed and not stopped:
+                _append(
+                    "stop_nodes",
+                    "error",
+                    stopped_nodes=stopped,
+                    failed_nodes=failed,
+                    error="all node stop attempts failed",
+                )
+            elif failed:
+                _append(
+                    "stop_nodes",
+                    "error",
+                    stopped_nodes=stopped,
+                    failed_nodes=failed,
+                    error="some nodes failed to stop",
+                )
+            else:
+                _append(
+                    "stop_nodes",
+                    "success",
+                    stopped_nodes=stopped,
+                    failed_nodes=failed,
+                    total=len(nodes),
+                )
+        except Exception as e:
+            logger.error(f"cleanup stop_nodes failed: {e}")
+            _append("stop_nodes", "error", error=str(e))
+
+    # --- close_project ---
+    if not close_project:
+        _append("close_project", "skipped", reason="close_project=false")
+    elif not project_id:
+        _append("close_project", "skipped", reason="project_id required")
+    else:
+        try:
+            client = await create_client_ready(server_url, username, password)
+            closed = await client.close_project(project_id)
+            _append("close_project", "success", project=closed)
+        except Exception as e:
+            logger.error(f"cleanup close_project failed: {e}")
+            _append("close_project", "error", error=str(e))
+
+    # --- stop_server (never via create_client_ready — would re-start) ---
+    if not stop_server:
+        _append("stop_server", "skipped", reason="stop_server=false")
+    else:
+        try:
+            stop_result = await stop_gns3_server(server_url)
+            step_status = "success" if stop_result.get("status") == "success" else "error"
+            _append("stop_server", step_status, result=stop_result)
+            if step_status == "error" and stop_result.get("error"):
+                steps[-1]["error"] = stop_result["error"]
+        except Exception as e:
+            logger.error(f"cleanup stop_server failed: {e}")
+            _append("stop_server", "error", error=str(e))
+
+    requested = []
+    if stop_nodes:
+        requested.append("stop_nodes")
+    if close_project:
+        requested.append("close_project")
+    if stop_server:
+        requested.append("stop_server")
+
+    # Overall status from steps that were not skipped
+    active = [s for s in steps if s.get("status") != "skipped"]
+    if not requested:
+        overall = "success"
+    elif not active:
+        # all requested became skipped (e.g. missing project_id only)
+        overall = "success"
+    else:
+        errors = [s for s in active if s.get("status") == "error"]
+        successes = [s for s in active if s.get("status") == "success"]
+        if errors and successes:
+            overall = "partial"
+        elif errors and not successes:
+            overall = "error"
+        else:
+            overall = "success"
+
+    return {
+        "status": overall,
+        "server_url": url,
+        "project_id": project_id,
+        "steps": steps,
+    }
 
 
 
