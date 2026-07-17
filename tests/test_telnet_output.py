@@ -21,6 +21,24 @@ class CleanAndPromptTests(unittest.TestCase):
         out = clean_console_text(raw)
         self.assertEqual(out, "line1\nline2\nline3\tkeep\n")
 
+    def test_clean_strips_ansi_color_sequences(self):
+        raw = "\x1b[01;36mcolored\x1b[0m text"
+        self.assertEqual(clean_console_text(raw), "colored text")
+
+    def test_clean_strips_ansi_and_osc_without_residue(self):
+        raw = (
+            "\x1b[1;32mOK\x1b[0m "
+            "\x1b[?1h\x1b=\x1b[H\x1b[2Jclear "
+            "\x1b]0;title\x07"
+            "R1# \x1b[7m--More--\x1b[m"
+        )
+        out = clean_console_text(raw)
+        self.assertEqual(out, "OK clear R1# ")
+        self.assertNotIn("[01", out)
+        self.assertNotIn("[0m", out)
+        self.assertNotIn("[7m", out)
+        self.assertNotIn("]0;title", out)
+
     def test_interior_hash_not_prompt(self):
         body = "!\n! Last configuration change at 12:00\ninterface Gi0/0\n ip address 1.1.1.1 255.255.255.0\n"
         self.assertFalse(prompt_complete(body + "comment with # inside\n"))

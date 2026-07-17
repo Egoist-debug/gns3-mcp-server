@@ -18,6 +18,35 @@ logger = logging.getLogger(__name__)
 DEFAULT_READY_TIMEOUT = 30.0
 DEFAULT_MAX_RESPONSE_BYTES = 512 * 1024
 _PAGER_RE = re.compile(r"(?i)--\s*more\s*--")
+_ANSI_RE = re.compile(
+    # Order matters: multi-byte CSI/OSC/DCS before single-byte Fe.
+    # Fe alone would match ESC] and leave residues like "0;title".
+    r"(?:"
+    r"\x1B\["          # CSI
+    r"[0-?]*"          # parameter bytes
+    r"[ -/]*"          # intermediate bytes
+    r"[@-~]"           # final byte
+    r"|"
+    r"\x1B\]"          # OSC
+    r"[^\x07\x1B]*"    # payload
+    r"(?:\x07|\x1B\\)" # BEL or ST
+    r"|"
+    r"\x1B[PX^_]"      # DCS / SOS / PM / APC
+    r".*?"
+    r"(?:\x1B\\|\x07)"
+    r"|"
+    r"\x1B[()][0-2AB]" # SCS character-set designate
+    r"|"
+    r"\x1B[=>]"        # DECKPAM / DECKPNM (keypad)
+    r"|"
+    r"\x1B[@-Z\\-_]"   # remaining 7-bit C1 Fe
+    r"|"
+    r"\x9B"            # 8-bit CSI
+    r"[0-?]*[ -/]*[@-~]"
+    r")"
+    ,
+    re.DOTALL,
+)
 _LOGIN_MARKERS = ("Username:", "username:", "login:", "Login:", "Password:", "password:")
 _USER_MARKERS = ("Username:", "username:", "login:", "Login:")
 _PASS_MARKERS = ("Password:", "password:")
@@ -54,7 +83,11 @@ def default_max_response_bytes() -> int:
 
 
 def clean_console_text(text: str) -> str:
-    """Normalize console text for agent consumption."""
+    """Normalize console text for agent consumption.
+
+    Strips Telnet IAC noise, full ANSI/VT escape sequences (not just ESC),
+    pager chrome, and remaining C0 controls while preserving printable text.
+    """
     if not text:
         return ""
     # Drop basic Telnet IAC command sequences (IAC + cmd [+ option]).
@@ -88,6 +121,9 @@ def clean_console_text(text: str) -> str:
         i += 1
     text = out.decode("utf-8", errors="ignore")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Remove full ANSI/VT sequences while ESC is still present.
+    # Dropping only ESC (later C0 filter) leaves residues like "[01;36m".
+    text = _ANSI_RE.sub("", text)
     # Strip pager chrome lines/fragments.
     text = _PAGER_RE.sub("", text)
     cleaned_chars: List[str] = []
@@ -95,7 +131,7 @@ def clean_console_text(text: str) -> str:
         o = ord(ch)
         if ch in ("\n", "\t") or 32 <= o <= 126 or o >= 160:
             cleaned_chars.append(ch)
-        # drop other C0 controls
+        # drop other C0 controls (including leftover lone ESC)
     text = "".join(cleaned_chars)
     # Collapse runs of spaces before newlines lightly.
     text = re.sub(r"[ \t]+\n", "\n", text)
