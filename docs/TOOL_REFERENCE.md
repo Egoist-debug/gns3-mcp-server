@@ -248,6 +248,9 @@ Notes:
   - Login handles Username:/login:/Password: heuristics with settle/retry
   - Command completion uses line-oriented shell prompts (avoids mid-output
     truncation on interior '#' / '>')
+  - Multi-command calls frame each results[i].response at the first shell
+    prompt after that command; residual console bytes stay buffered so later
+    commands are not shifted or merged into earlier responses
   - Auto-pages --More-- and cleans CR/control noise from responses
   - Per-command response cap: 512 KiB (GNS3_CONSOLE_MAX_RESPONSE_BYTES);
     over-cap results set truncated=true + length metadata
@@ -632,6 +635,9 @@ Use pre-built templates instead of raw commands - they're tested and reliable.
 
 ### 6. Console Access
 The console tools support auto-detection of prompts and config modes.
+When multiple commands are sent in one call, each response is framed to the
+first shell/config prompt for that command (residual buffer), so command and
+response lists stay aligned.
 
 ### 7. Error Handling
 All tools return `{"status": "success"}` or `{"status": "error", "error": "message"}`.

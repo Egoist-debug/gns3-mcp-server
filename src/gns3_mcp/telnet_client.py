@@ -196,8 +196,34 @@ def looks_like_shell_prompt(line: str, extra_markers: Optional[List[str]] = None
 
 
 def prompt_complete(buf: str, wait_for: Optional[List[str]] = None) -> bool:
-    last = _last_nonempty_line(buf)
-    return looks_like_shell_prompt(last, extra_markers=wait_for)
+    """True when buffer contains at least one shell/config prompt line."""
+    return split_at_first_prompt(buf, wait_for=wait_for) is not None
+
+
+def split_at_first_prompt(
+    buf: str, wait_for: Optional[List[str]] = None
+) -> Optional[Tuple[str, str]]:
+    """Split buffer at the first shell/config prompt line.
+
+    Returns ``(through_prompt, remainder)`` or ``None`` if no prompt yet.
+    Completion is first-prompt (not last-line) so multi-command bleed cannot
+    be returned as a single response.
+    """
+    if not buf:
+        return None
+
+    norm = buf.replace("\r\n", "\n").replace("\r", "\n")
+    lines = norm.split("\n")
+    acc: List[str] = []
+    for i, line in enumerate(lines):
+        acc.append(line)
+        if line.strip() and looks_like_shell_prompt(line.strip(), extra_markers=wait_for):
+            complete = "\n".join(acc)
+            if i < len(lines) - 1:
+                complete += "\n"
+            remainder = "\n".join(lines[i + 1 :])
+            return complete, remainder
+    return None
 
 
 def apply_response_cap(text: str, max_bytes: Optional[int] = None) -> Tuple[str, Dict[str, Any]]:
@@ -232,6 +258,9 @@ class TelnetClient:
         self.sock: Optional[socket.socket] = None
         self.connected = False
         self.max_response_bytes = default_max_response_bytes()
+        # Unconsumed console bytes after first-prompt framing. Never invent data:
+        # only socket reads and split remainders land here.
+        self._rx_buf: str = ""
 
     def connect(self) -> bool:
         """Connect to the Telnet server."""
@@ -240,11 +269,13 @@ class TelnetClient:
             self.sock.settimeout(self.timeout)
             self.sock.connect((self.host, self.port))
             self.connected = True
+            self._rx_buf = ""
             logger.info(f"Telnet connected to {self.host}:{self.port}")
             return True
         except Exception as e:
             logger.error(f"Telnet connection failed to {self.host}:{self.port}: {e}")
             self.connected = False
+            self._rx_buf = ""
             return False
 
     def close(self):
@@ -256,6 +287,7 @@ class TelnetClient:
                 pass
             self.sock = None
             self.connected = False
+            self._rx_buf = ""
             logger.info(f"Telnet connection closed to {self.host}:{self.port}")
 
     def _recv_chunk(self, size: int = 4096) -> str:
@@ -272,6 +304,101 @@ class TelnetClient:
             logger.error(f"Read error: {e}")
             return ""
 
+    def _push_rx(self, data: str) -> None:
+        if data:
+            self._rx_buf += data
+            # Bound residual growth similarly to read_until hard stop.
+            cap = max(self.max_response_bytes * 2, 1024)
+            raw = self._rx_buf.encode("utf-8", errors="ignore")
+            if len(raw) > cap:
+                self._rx_buf = raw[-cap:].decode("utf-8", errors="ignore")
+
+    def _take_rx(self) -> str:
+        data = self._rx_buf
+        self._rx_buf = ""
+        return data
+
+    def _rx_is_prompt_only(self, wait_for: Optional[List[str]] = None) -> bool:
+        """True if residual is empty/whitespace or only shell prompt line(s)."""
+        text = self._rx_buf
+        if not text or not text.strip():
+            return True
+        for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            s = line.strip()
+            if not s:
+                continue
+            if not looks_like_shell_prompt(s, extra_markers=wait_for):
+                return False
+        return True
+
+    def _strip_leading_prompts(self, wait_for: Optional[List[str]] = None) -> None:
+        """Drop leading shell-prompt lines from residual; keep body lines.
+
+        Leftover ``R1#`` after boot/login must not early-complete the next
+        command. Body that already arrived (rare / scripted) is preserved.
+        """
+        if not self._rx_buf:
+            return
+        norm = self._rx_buf.replace("\r\n", "\n").replace("\r", "\n")
+        lines = norm.split("\n")
+        i = 0
+        while i < len(lines):
+            s = lines[i].strip()
+            if not s:
+                i += 1
+                continue
+            if looks_like_shell_prompt(s, extra_markers=wait_for):
+                i += 1
+                continue
+            break
+        self._rx_buf = "\n".join(lines[i:])
+
+    def _drain_idle_prompts(
+        self,
+        wait_for: Optional[List[str]] = None,
+        budget: float = 0.5,
+        idle_gap: float = 0.05,
+    ) -> None:
+        """Absorb brief leftover prompt noise; strip leading residual prompts.
+
+        Stops after the first non-empty absorption (prompt-only clear or
+        non-prompt body) so a following command's scripted/queued output is
+        not pulled before send. Idle gap only applies while still empty.
+        """
+        if not self.sock or not self.connected:
+            return
+
+        # Residual may already hold a leftover prompt from boot/login.
+        if self._rx_buf:
+            if self._rx_is_prompt_only(wait_for):
+                self._rx_buf = ""
+                return
+            self._strip_leading_prompts(wait_for)
+            return
+
+        deadline = time.time() + max(0.05, budget)
+        last_data = time.time()
+        try:
+            while time.time() < deadline:
+                self.sock.settimeout(min(idle_gap, max(0.02, deadline - time.time())))
+                chunk = self._recv_chunk()
+                if chunk:
+                    self._push_rx(chunk)
+                    if self._rx_is_prompt_only(wait_for):
+                        self._rx_buf = ""
+                    else:
+                        self._strip_leading_prompts(wait_for)
+                    return
+                if (time.time() - last_data) >= idle_gap:
+                    break
+        except Exception as e:
+            logger.error(f"Pre-command drain error: {e}")
+        finally:
+            try:
+                self.sock.settimeout(self.timeout)
+            except Exception:
+                pass
+
     def read_until(
         self,
         valid_end_chars: Optional[List[str]] = None,
@@ -281,11 +408,11 @@ class TelnetClient:
         handle_pager: bool = True,
         max_bytes: Optional[int] = None,
     ) -> str:
-        """Read from socket until prompt/completion condition or timeout.
+        """Read until first shell/config prompt (line-oriented) or timeout.
 
-        When line_oriented=True (default), completion is based on the last
-        non-empty line looking like a shell/config prompt (or matching markers
-        on that line). This avoids truncating on interior '#'/'>' in output.
+        Line-oriented mode completes on the **first** prompt line and stashes
+        any remainder in the residual RX buffer for subsequent reads. This
+        keeps multi-command output paired with the correct command.
         """
         if not self.sock or not self.connected:
             return ""
@@ -293,8 +420,27 @@ class TelnetClient:
         timeout = timeout if timeout is not None else self.timeout
         cap = max_bytes if max_bytes is not None else self.max_response_bytes
         start_time = time.time()
-        buf = ""
+        buf = self._take_rx()
         markers = list(valid_end_chars or list(_SHELL_ENDINGS))
+        hard_cap = cap * 2
+
+        def _trim(buf_in: str) -> str:
+            raw = buf_in.encode("utf-8", errors="ignore")
+            if len(raw) <= hard_cap:
+                return buf_in
+            return raw[:hard_cap].decode("utf-8", errors="ignore")
+
+        # Residual alone may already contain a complete framed response.
+        if line_oriented:
+            split = split_at_first_prompt(buf, wait_for=markers)
+            if split is not None:
+                complete, remainder = split
+                self._push_rx(remainder)
+                return complete
+        else:
+            for end_char in markers:
+                if end_char and end_char in buf:
+                    return buf
 
         while time.time() - start_time < timeout:
             try:
@@ -302,11 +448,7 @@ class TelnetClient:
                 chunk = self._recv_chunk()
                 if chunk:
                     buf += chunk
-                    if len(buf.encode("utf-8", errors="ignore")) > cap * 2:
-                        # Hard stop raw growth; final apply_response_cap still runs at caller.
-                        buf = buf.encode("utf-8", errors="ignore")[: cap * 2].decode(
-                            "utf-8", errors="ignore"
-                        )
+                    buf = _trim(buf)
 
                 last = _last_nonempty_line(buf)
                 if handle_pager and is_pager_line(last):
@@ -319,11 +461,14 @@ class TelnetClient:
                     continue
 
                 if line_oriented:
-                    if prompt_complete(buf, wait_for=markers):
-                        return buf
+                    split = split_at_first_prompt(buf, wait_for=markers)
+                    if split is not None:
+                        complete, remainder = split
+                        self._push_rx(remainder)
+                        return complete
                 else:
                     for end_char in markers:
-                        if end_char in buf:
+                        if end_char and end_char in buf:
                             return buf
 
                 if not chunk:
@@ -332,6 +477,7 @@ class TelnetClient:
                 logger.error(f"Read error: {e}")
                 break
 
+        # Timeout: return everything read; residual stays empty for this partial.
         return buf
 
     def read_available(self, wait_time: float = 0.5, idle_gap: float = 0.2) -> str:
@@ -340,7 +486,7 @@ class TelnetClient:
             return ""
 
         time.sleep(wait_time)
-        buf = ""
+        buf = self._take_rx()
         deadline = time.time() + max(wait_time * 4, 2.0)
         last_data = time.time()
         try:
@@ -383,6 +529,8 @@ class TelnetClient:
     ):
         """Send a command and wait for response.
 
+        Pre-send drain drops prompt-only residual so leftover prompts after
+        boot/login cannot be returned as this command's entire response.
         Returns cleaned text, or (text, meta) when return_meta=True.
         """
         if not self.sock or not self.connected:
@@ -391,6 +539,9 @@ class TelnetClient:
             return ("", empty_meta) if return_meta else ""
 
         try:
+            markers = list(wait_for) if wait_for is not None else list(_SHELL_ENDINGS)
+            self._drain_idle_prompts(wait_for=markers)
+
             full_cmd = f"{cmd}\r"
             self.sock.send(full_cmd.encode())
             logger.debug(f"Sent command: {cmd}")

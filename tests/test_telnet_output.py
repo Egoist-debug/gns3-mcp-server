@@ -12,6 +12,7 @@ from gns3_mcp.telnet_client import (
     clean_console_text,
     looks_like_shell_prompt,
     prompt_complete,
+    split_at_first_prompt,
 )
 
 
@@ -51,6 +52,21 @@ class CleanAndPromptTests(unittest.TestCase):
         self.assertFalse(looks_like_shell_prompt("Password:"))
         self.assertFalse(looks_like_shell_prompt("--More--"))
         self.assertFalse(looks_like_shell_prompt("! comment #"))
+
+    def test_split_at_first_prompt_keeps_remainder(self):
+        buf = "show ver\nCisco IOS\nR1#\nshow ip\nEth0 up\nR1#"
+        split = split_at_first_prompt(buf, wait_for=["#", ">"])
+        self.assertIsNotNone(split)
+        complete, remainder = split
+        self.assertIn("Cisco IOS", complete)
+        self.assertTrue(complete.rstrip().endswith("R1#"))
+        self.assertNotIn("Eth0", complete)
+        self.assertIn("show ip", remainder)
+        self.assertIn("Eth0", remainder)
+
+    def test_prompt_complete_true_on_first_of_many(self):
+        buf = "body1\nR1#\nbody2\nR1#"
+        self.assertTrue(prompt_complete(buf, wait_for=["#"]))
 
     def test_apply_cap_marks_truncated(self):
         text = "a" * 200
@@ -140,6 +156,80 @@ class TelnetOutputTests(unittest.TestCase):
         text, meta = c.send_cmd("show", wait_for=["#"], return_meta=True)
         self.assertTrue(meta["truncated"])
         self.assertLessEqual(len(text.encode("utf-8")), 40)
+
+
+
+class TelnetMultiCommandPairingTests(unittest.TestCase):
+    """Command/response pairing: residual buffer + first-prompt framing."""
+
+    def _client(self, reads, timeout: float = 2.0) -> TelnetClient:
+        c = TelnetClient("127.0.0.1", 5000, timeout=timeout)
+        c.sock = FakeSock(reads)
+        c.connected = True
+        return c
+
+    def test_residual_prompt_does_not_shift_pairing(self):
+        # Leftover prompt after login/boot must not become cmd1's response.
+        c = self._client(
+            [
+                "R1#",
+                "show ver\nCisco IOS Software\nR1#",
+                "show ip\nEth0 is up\nR1#",
+            ]
+        )
+        r1, _ = c.send_cmd("show ver", wait_for=["#", ">"], return_meta=True)
+        r2, _ = c.send_cmd("show ip", wait_for=["#", ">"], return_meta=True)
+        self.assertIn("Cisco IOS", r1)
+        self.assertNotIn("Eth0", r1)
+        self.assertIn("Eth0", r2)
+        self.assertNotIn("Cisco IOS", r2)
+
+    def test_multi_prompt_chunk_split_across_commands(self):
+        # One socket chunk holds two full command cycles.
+        c = self._client(
+            [
+                "show ver\nCisco IOS\nR1#\nshow ip\nEth0 up\nR1#",
+            ]
+        )
+        r1, _ = c.send_cmd("show ver", wait_for=["#", ">"], return_meta=True)
+        r2, _ = c.send_cmd("show ip", wait_for=["#", ">"], return_meta=True)
+        self.assertIn("Cisco IOS", r1)
+        self.assertTrue(r1.rstrip().endswith("R1#") or "R1#" in r1.splitlines()[-1])
+        self.assertNotIn("Eth0", r1)
+        self.assertIn("Eth0", r2)
+        self.assertNotIn("Cisco IOS", r2)
+
+    def test_three_command_sequence_stays_ordered(self):
+        c = self._client(
+            [
+                "cmd-a\nAAA\nR1#",
+                "cmd-b\nBBB\nR1#",
+                "cmd-c\nCCC\nR1#",
+            ]
+        )
+        ra, _ = c.send_cmd("a", wait_for=["#"], return_meta=True)
+        rb, _ = c.send_cmd("b", wait_for=["#"], return_meta=True)
+        rc, _ = c.send_cmd("c", wait_for=["#"], return_meta=True)
+        self.assertIn("AAA", ra)
+        self.assertIn("BBB", rb)
+        self.assertIn("CCC", rc)
+        self.assertNotIn("BBB", ra)
+        self.assertNotIn("CCC", ra)
+        self.assertNotIn("AAA", rb)
+        self.assertNotIn("CCC", rb)
+        self.assertNotIn("AAA", rc)
+        self.assertNotIn("BBB", rc)
+
+    def test_read_until_leaves_remainder_in_residual(self):
+        c = self._client(
+            [
+                "line1\nR1#\nline2\nR2#",
+            ]
+        )
+        first = c.read_until(["#", ">"], timeout=2.0)
+        self.assertIn("line1", first)
+        self.assertNotIn("line2", first)
+        self.assertIn("line2", c._rx_buf)
 
 
 class TelnetLoginReadyTests(unittest.TestCase):
