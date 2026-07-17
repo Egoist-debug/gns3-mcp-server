@@ -93,10 +93,13 @@ Every GNS3-backed tool probes the server first. If the URL is **localhost** and 
 | `GNS3_SERVER_HEALTHY_CACHE_SECONDS` | Skip re-probe window (default `30`) |
 | `GNS3_USERNAME` / `GNS3_PASSWORD` | GNS3 API auth |
 | `GNS3_CONSOLE_USER` / `GNS3_CONSOLE_PASSWORD` | Default console login for `gns3_send_console_commands` |
+| `GNS3_CONSOLE_READY_TIMEOUT` | Console login readiness budget seconds (default `30`) |
+| `GNS3_CONSOLE_MAX_RESPONSE_BYTES` | Per-command console output cap (default `524288`) |
 | `GNS3_SSH_USER` / `GNS3_SSH_PASSWORD` | Default guest SSH for `gns3_ssh_exec` |
 | `GNS3_SSH_HOST_KEY_POLICY` | `accept_new` (default) / `strict` / `warn` |
+| `GNS3_SSH_CONNECT_TIMEOUT` | SSH connect readiness budget with retries (default `30`) |
 
-Explicit tool: `gns3_ensure_server`. Guest login uses `login_username`/`login_password` (console) or `ssh_username`/`ssh_password` (SSH) — **not** the API `username`/`password` fields.
+Explicit tool: `gns3_ensure_server`. Guest login uses `login_username`/`login_password` (console) or `ssh_username`/`ssh_password` (SSH) — **not** the API `username`/`password` fields. Console output is line-prompt complete, cleaned, and auto-paged; SSH retries transient connect failures within the budget.
 
 
 **🎉 That's it! You're now ready for AI-powered network engineering!**

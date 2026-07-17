@@ -848,6 +848,7 @@ async def _send_console_commands_impl(
     enable_password: Optional[str] = None,
     login_username: Optional[str] = None,
     login_password: Optional[str] = None,
+    ready_timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Internal console command sender (not an MCP tool — safe to await)."""
     try:
@@ -883,27 +884,42 @@ async def _send_console_commands_impl(
 
             authenticated = False
             if need_login:
-                if not telnet.login(resolved_login_user, resolved_login_pass):
+                if not telnet.login(
+                    resolved_login_user,
+                    resolved_login_pass,
+                    ready_timeout=ready_timeout,
+                ):
                     return {"status": "error", "error": "Console authentication failed"}
                 authenticated = True
 
+            def _result_entry(cmd: str, output: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                entry: Dict[str, Any] = {"command": cmd, "response": output}
+                if meta and meta.get("truncated"):
+                    entry["truncated"] = True
+                    entry["response_bytes"] = meta.get("response_bytes")
+                    entry["response_bytes_raw"] = meta.get("response_bytes_raw")
+                return entry
+
             if enter_config_mode:
-                outputs = telnet.send_config_commands(
+                outputs, metas = telnet.send_config_commands(
                     commands,
                     enter_config=True,
                     save_config=save_config,
                     enable_password=enable_password,
+                    return_meta=True,
                 )
                 results = [
-                    {"command": cmd, "response": output}
-                    for cmd, output in zip(commands, outputs)
+                    _result_entry(cmd, output, meta)
+                    for cmd, output, meta in zip(commands, outputs, metas)
                 ]
             else:
                 results = []
                 prompts = [">", "#", "$", "%"]
                 for cmd in commands:
-                    output = telnet.send_cmd(cmd, wait_for=prompts, wait_time=1.0)
-                    results.append({"command": cmd, "response": output})
+                    output, meta = telnet.send_cmd(
+                        cmd, wait_for=prompts, wait_time=1.0, return_meta=True
+                    )
+                    results.append(_result_entry(cmd, output, meta))
 
             payload: Dict[str, Any] = {
                 "status": "success",
@@ -938,19 +954,22 @@ async def gns3_send_console_commands(
     enable_password: Optional[str] = None,
     login_username: Optional[str] = None,
     login_password: Optional[str] = None,
+    ready_timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Send commands to a node's console via Telnet.
 
     Args:
         commands: List of commands to execute
-        wait_for_boot: Wait for device to boot before sending commands
+        wait_for_boot: Wait for device boot before sending commands
         boot_timeout: Maximum time to wait for boot (seconds)
         enter_config_mode: Automatically enter config mode (Cisco)
         save_config: Save configuration after commands (Cisco)
         enable_password: Enable password if required
         login_username: Console login username (or GNS3_CONSOLE_USER)
         login_password: Console login password (or GNS3_CONSOLE_PASSWORD)
+        ready_timeout: Post-connect login readiness budget seconds
+            (default 30 / GNS3_CONSOLE_READY_TIMEOUT)
     """
     return await _send_console_commands_impl(
         project_id=project_id,
@@ -966,6 +985,7 @@ async def gns3_send_console_commands(
         enable_password=enable_password,
         login_username=login_username,
         login_password=login_password,
+        ready_timeout=ready_timeout,
     )
 
 @mcp.tool
@@ -1798,6 +1818,7 @@ async def gns3_ssh_exec(
     ssh_password: Optional[str] = None,
     stop_on_error: bool = True,
     host_key_policy: str = "accept_new",
+    connect_timeout: Optional[float] = None,
     server_url: str = "http://localhost:3080",
     username: Optional[str] = None,
     password: Optional[str] = None,
@@ -1818,6 +1839,8 @@ async def gns3_ssh_exec(
         ssh_password: Guest SSH password (or GNS3_SSH_PASSWORD)
         stop_on_error: Stop after first non-zero exit (default True)
         host_key_policy: accept_new | strict | warn (default accept_new)
+        connect_timeout: Total SSH connect readiness budget in seconds
+            (default 30 / GNS3_SSH_CONNECT_TIMEOUT); retries transient failures
         username/password: GNS3 API auth (not guest credentials)
     """
     try:
@@ -1847,6 +1870,7 @@ async def gns3_ssh_exec(
             password=passwd,
             stop_on_error=stop_on_error,
             host_key_policy=host_key_policy,
+            connect_timeout=connect_timeout,
         )
     except Exception as e:
         logger.error(f"Failed SSH exec: {e}")

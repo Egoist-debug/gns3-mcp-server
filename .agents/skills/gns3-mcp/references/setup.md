@@ -21,8 +21,11 @@ Secrets: set via environment or host MCP config. Examples use **placeholders onl
 | `GNS3_SERVER_START_TIMEOUT` | Wait for auto-start (default `30`) |
 | `GNS3_SERVER_HEALTHY_CACHE_SECONDS` | Skip re-probe window (default `30`) |
 | `GNS3_CONSOLE_USER` / `GNS3_CONSOLE_PASSWORD` | Default device console login |
+| `GNS3_CONSOLE_READY_TIMEOUT` | Console login readiness budget seconds (default `30`) |
+| `GNS3_CONSOLE_MAX_RESPONSE_BYTES` | Per-command console output cap (default `524288`) |
 | `GNS3_SSH_USER` / `GNS3_SSH_PASSWORD` | Default guest SSH |
 | `GNS3_SSH_HOST_KEY_POLICY` | `accept_new` (default) / `strict` / `warn` |
+| `GNS3_SSH_CONNECT_TIMEOUT` | SSH connect readiness budget with retries (default `30`) |
 | `GNS3_MCP_LAUNCH_LOG` | Optional launcher log path (OMP script) |
 
 API `username`/`password` tool fields are **not** guest console/SSH credentials.

@@ -5,6 +5,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import asyncssh
+
 from gns3_mcp import ssh_client
 
 
@@ -118,6 +120,54 @@ class ExecCommandsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["status"], "success")
         self.assertEqual(len(out["results"]), 2)
         self.assertEqual(out["username"], "user")
+
+    async def test_retries_transient_then_succeeds(self):
+        conn = MagicMock()
+        conn.run = AsyncMock(
+            return_value=MagicMock(stdout="ok", stderr="", exit_status=0)
+        )
+        conn.__aenter__ = AsyncMock(return_value=conn)
+        conn.__aexit__ = AsyncMock(return_value=None)
+
+        refused = ConnectionRefusedError("connection refused")
+        with patch(
+            "gns3_mcp.ssh_client.asyncssh.connect",
+            side_effect=[refused, conn],
+        ) as connect, patch(
+            "gns3_mcp.ssh_client.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep:
+            out = await ssh_client.exec_commands(
+                "10.0.0.1",
+                ["id"],
+                username="user",
+                password="pass",
+                connect_timeout=5.0,
+            )
+        self.assertEqual(out["status"], "success")
+        self.assertEqual(out["connect_attempts"], 2)
+        self.assertEqual(connect.call_count, 2)
+        sleep.assert_awaited()
+
+    async def test_permission_denied_not_retried(self):
+        with patch(
+            "gns3_mcp.ssh_client.asyncssh.connect",
+            side_effect=asyncssh.PermissionDenied("nope"),
+        ) as connect, patch(
+            "gns3_mcp.ssh_client.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep:
+            out = await ssh_client.exec_commands(
+                "10.0.0.1",
+                ["id"],
+                username="user",
+                password="bad",
+                connect_timeout=10.0,
+            )
+        self.assertEqual(out["status"], "error")
+        self.assertFalse(out["authenticated"])
+        self.assertEqual(out["connect_attempts"], 1)
+        self.assertEqual(connect.call_count, 1)
+        sleep.assert_not_awaited()
+        self.assertNotIn("bad", str(out))
 
 
 if __name__ == "__main__":

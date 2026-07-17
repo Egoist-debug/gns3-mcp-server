@@ -44,7 +44,7 @@ class TelnetLoginTests(unittest.TestCase):
         c = self._client_with([b"R1#"])
         # read_until will use recv loop; provide enough data
         with patch.object(c, "read_until", side_effect=["R1#"]):
-            self.assertTrue(c.login("admin", "secret"))
+            self.assertTrue(c.login("admin", "secret", settle=0.0))
 
     def test_username_password_flow(self):
         c = self._client_with([])
@@ -53,7 +53,7 @@ class TelnetLoginTests(unittest.TestCase):
             "read_until",
             side_effect=["User Access Verification\nUsername:", "Password:", "R1>"],
         ):
-            ok = c.login("admin", "secret")
+            ok = c.login("admin", "secret", settle=0.0)
             self.assertTrue(ok)
             # username then password sent
             sent = b"".join(c.sock.sent)
@@ -63,7 +63,7 @@ class TelnetLoginTests(unittest.TestCase):
     def test_missing_password_fails(self):
         c = self._client_with([])
         with patch.object(c, "read_until", side_effect=["Password:"]):
-            self.assertFalse(c.login("admin", None))
+            self.assertFalse(c.login("admin", None, settle=0.0))
 
     def test_auth_failure_stays_at_login(self):
         c = self._client_with([])
@@ -73,7 +73,7 @@ class TelnetLoginTests(unittest.TestCase):
             side_effect=["Username:", "Password:", "Username:", "Username:"],
         ):
             # After password still Username: and no shell
-            self.assertFalse(c.login("admin", "bad"))
+            self.assertFalse(c.login("admin", "bad", settle=0.0, ready_timeout=2.0))
 
 
 if __name__ == "__main__":

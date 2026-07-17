@@ -193,10 +193,17 @@ Args:
   - enable_password: Enable password if needed
   - login_username: Console login user (or GNS3_CONSOLE_USER)
   - login_password: Console login password (or GNS3_CONSOLE_PASSWORD)
+  - ready_timeout: Login readiness budget seconds after connect/boot
+      (default 30 / GNS3_CONSOLE_READY_TIMEOUT)
 
 Notes:
   - username/password on this tool are GNS3 API auth, not console login
-  - Login handles Username:/login:/Password: heuristics
+  - Login handles Username:/login:/Password: heuristics with settle/retry
+  - Command completion uses line-oriented shell prompts (avoids mid-output
+    truncation on interior '#' / '>')
+  - Auto-pages --More-- and cleans CR/control noise from responses
+  - Per-command response cap: 512 KiB (GNS3_CONSOLE_MAX_RESPONSE_BYTES);
+    over-cap results set truncated=true + length metadata
   - Does not auto-start the node; use gns3_start_node first
 
 Example:
@@ -267,13 +274,16 @@ Args:
   - ssh_password: Guest password (or GNS3_SSH_PASSWORD)
   - stop_on_error: Stop after first non-zero exit (default true)
   - host_key_policy: accept_new (accept any key) | strict (default known_hosts) | warn (accept + log fingerprint)
+  - connect_timeout: Total connect readiness budget seconds (default 30 /
+      GNS3_SSH_CONNECT_TIMEOUT). Retries transient failures (refused/timeout);
+      does not retry PermissionDenied.
   - username/password: GNS3 API auth for metadata lookup only
 
 Returns per command: {command, stdout, stderr, exit_code}
-Passwords are never returned in the payload.
+Also may include connect_attempts. Passwords are never returned in the payload.
 
 Env:
-  GNS3_SSH_USER, GNS3_SSH_PASSWORD, GNS3_SSH_HOST_KEY_POLICY
+  GNS3_SSH_USER, GNS3_SSH_PASSWORD, GNS3_SSH_HOST_KEY_POLICY, GNS3_SSH_CONNECT_TIMEOUT
 ```
 
 ---
