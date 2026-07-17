@@ -81,6 +81,24 @@ gemini mcp add gns3 "path/to/gns3-mcp-server/run.sh"   # Linux/Mac
 gemini "List all GNS3 projects"
 ```
 
+### **GNS3 server auto-start**
+
+Every GNS3-backed tool probes the server first. If the URL is **localhost** and the probe fails, MCP starts `gns3server` (or `GNS3_SERVER_START_CMD`) and waits until healthy. Remote URLs are never auto-started.
+
+| Env | Purpose |
+|-----|---------|
+| `GNS3_SERVER_URL` | REST base URL (default `http://localhost:3080`) |
+| `GNS3_SERVER_START_CMD` | Full start command; custom values are not rewritten |
+| `GNS3_SERVER_START_TIMEOUT` | Wait budget seconds (default `30`) |
+| `GNS3_SERVER_HEALTHY_CACHE_SECONDS` | Skip re-probe window (default `30`) |
+| `GNS3_USERNAME` / `GNS3_PASSWORD` | GNS3 API auth |
+| `GNS3_CONSOLE_USER` / `GNS3_CONSOLE_PASSWORD` | Default console login for `gns3_send_console_commands` |
+| `GNS3_SSH_USER` / `GNS3_SSH_PASSWORD` | Default guest SSH for `gns3_ssh_exec` |
+| `GNS3_SSH_HOST_KEY_POLICY` | `accept_new` (default) / `strict` / `warn` |
+
+Explicit tool: `gns3_ensure_server`. Guest login uses `login_username`/`login_password` (console) or `ssh_username`/`ssh_password` (SSH) — **not** the API `username`/`password` fields.
+
+
 **🎉 That's it! You're now ready for AI-powered network engineering!**
 
 ---

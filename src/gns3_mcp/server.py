@@ -19,6 +19,8 @@ from fastmcp import FastMCP
 from .gns3_client import GNS3APIClient, GNS3Config
 from .telnet_client import TelnetClient
 from .config_templates import ConfigTemplates, TopologyTemplates
+from .server_lifecycle import ensure_gns3_server, normalize_server_url
+from . import ssh_client as ssh_helpers
 
 # Keep MCP stdio clean: default WARNING unless GNS3_MCP_DEBUG is set.
 _log_level = logging.DEBUG if os.environ.get("GNS3_MCP_DEBUG") else logging.WARNING
@@ -48,6 +50,27 @@ def create_client(
     )
     return GNS3APIClient(config)
 
+async def create_client_ready(
+    server_url: Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> GNS3APIClient:
+    """Ensure GNS3 is reachable (auto-start if local) then create API client."""
+    config = GNS3Config.from_env(
+        server_url=server_url,
+        username=username,
+        password=password,
+    )
+    result = await ensure_gns3_server(
+        config.server_url,
+        username=config.username,
+        password=config.password,
+    )
+    if result.get("status") != "success":
+        raise Exception(result.get("error") or f"GNS3 server not available at {config.server_url}")
+    return GNS3APIClient(config)
+
+
 async def get_node_by_name(client: GNS3APIClient, project_id: str, node_name: str) -> Optional[Dict[str, Any]]:
     """Find a node by name in a project."""
     nodes = await client.get_project_nodes(project_id)
@@ -58,6 +81,46 @@ async def get_node_by_name(client: GNS3APIClient, project_id: str, node_name: st
 
 
 # ==================== SERVER & COMPUTE TOOLS ====================
+@mcp.tool
+async def gns3_ensure_server(
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """
+    Probe the GNS3 server and auto-start it when the target is localhost.
+
+    Remote server URLs are probed only (never auto-started).
+    When started by this tool, the process is left running after MCP exits.
+
+    Args:
+        server_url: GNS3 REST base URL
+        username: Optional GNS3 API username
+        password: Optional GNS3 API password
+        force: Bypass healthy cache and re-probe
+    """
+    try:
+        return await ensure_gns3_server(
+            server_url,
+            username=username,
+            password=password,
+            force=force,
+        )
+    except Exception as e:
+        logger.error(f"Failed to ensure GNS3 server: {e}")
+        return {
+            "status": "error",
+            "already_running": False,
+            "started": False,
+            "server_url": normalize_server_url(server_url),
+            "server_info": None,
+            "start_command": None,
+            "wait_seconds": 0,
+            "error": str(e),
+        }
+
+
 
 @mcp.tool
 async def gns3_get_server_info(
@@ -70,7 +133,7 @@ async def gns3_get_server_info(
     Returns server version, supported features, and system information.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         info = await client.get_server_info()
         return {"status": "success", "server_info": info}
     except Exception as e:
@@ -89,7 +152,7 @@ async def gns3_list_computes(
     Shows compute ID, name, protocol, host, port, and status.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         computes = await client.get_compute_list()
         return {"status": "success", "computes": computes, "total": len(computes)}
     except Exception as e:
@@ -110,7 +173,7 @@ async def gns3_list_projects(
     Shows project name, ID, node/link counts, and status.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         projects = await client.get_projects()
         
         projects_summary = []
@@ -158,7 +221,7 @@ async def gns3_create_project(
         path: Custom path for project files
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         project = await client.create_project(name, auto_close, auto_open, auto_start, path)
         return {"status": "success", "project": project}
     except Exception as e:
@@ -178,7 +241,7 @@ async def gns3_get_project(
     Returns complete project configuration and statistics.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         project = await client.get_project(project_id)
         return {"status": "success", "project": project}
     except Exception as e:
@@ -202,7 +265,7 @@ async def gns3_update_project(
     Only specified parameters will be updated.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         update_data = {}
         if name is not None:
             update_data["name"] = name
@@ -229,7 +292,7 @@ async def gns3_open_project(
 ) -> Dict[str, Any]:
     """Open an existing GNS3 project for editing."""
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         opened_project = await client.open_project(project_id)
         return {"status": "success", "project": opened_project}
     except Exception as e:
@@ -246,7 +309,7 @@ async def gns3_close_project(
 ) -> Dict[str, Any]:
     """Close an open project. All nodes will be stopped."""
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         closed_project = await client.close_project(project_id)
         return {"status": "success", "project": closed_project, "message": "Project closed successfully"}
     except Exception as e:
@@ -266,7 +329,7 @@ async def gns3_delete_project(
     WARNING: This action cannot be undone!
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         await client.delete_project(project_id)
         return {"status": "success", "message": f"Project {project_id} deleted permanently"}
     except Exception as e:
@@ -288,7 +351,7 @@ async def gns3_duplicate_project(
     Creates an exact copy of the project including all nodes and configurations.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         duplicated = await client.duplicate_project(project_id, new_name, path)
         return {"status": "success", "project": duplicated, "message": "Project duplicated successfully"}
     except Exception as e:
@@ -310,7 +373,7 @@ async def gns3_list_nodes(
     Shows node name, type, status, console port, and position.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         nodes = await client.get_project_nodes(project_id)
         
         nodes_summary = []
@@ -357,7 +420,7 @@ async def gns3_add_node(
         compute_id: Compute server ID (default: "local")
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         node = await client.create_node_from_template(
             project_id=project_id,
             template_id=template_id,
@@ -385,7 +448,7 @@ async def gns3_get_node(
     Returns complete node configuration including ports and properties.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         node = await client.get_node(project_id, node_id)
         return {"status": "success", "node": node}
     except Exception as e:
@@ -414,7 +477,7 @@ async def gns3_update_node(
         properties: Device-specific properties (RAM, CPU, interfaces, etc.)
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         update_data = {}
         if name is not None:
             update_data["name"] = name
@@ -445,7 +508,7 @@ async def gns3_delete_node(
     All links connected to this node will also be deleted.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         await client.delete_node(project_id, node_id)
         return {"status": "success", "message": f"Node {node_id} deleted successfully"}
     except Exception as e:
@@ -463,7 +526,7 @@ async def gns3_start_node(
 ) -> Dict[str, Any]:
     """Start a specific node."""
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         node = await client.start_node(project_id, node_id)
         return {"status": "success", "node": node, "message": "Node started"}
     except Exception as e:
@@ -481,7 +544,7 @@ async def gns3_stop_node(
 ) -> Dict[str, Any]:
     """Stop a specific node."""
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         node = await client.stop_node(project_id, node_id)
         return {"status": "success", "node": node, "message": "Node stopped"}
     except Exception as e:
@@ -499,7 +562,7 @@ async def gns3_suspend_node(
 ) -> Dict[str, Any]:
     """Suspend a node (pause execution, save state)."""
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         node = await client.suspend_node(project_id, node_id)
         return {"status": "success", "node": node, "message": "Node suspended"}
     except Exception as e:
@@ -517,7 +580,7 @@ async def gns3_reload_node(
 ) -> Dict[str, Any]:
     """Reload a node (restart without stopping)."""
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         node = await client.reload_node(project_id, node_id)
         return {"status": "success", "node": node, "message": "Node reloaded"}
     except Exception as e:
@@ -540,7 +603,7 @@ async def gns3_duplicate_node(
     The duplicate will be placed at the specified offset from the original.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         node = await client.duplicate_node(project_id, node_id, x, y)
         return {"status": "success", "node": node, "message": "Node duplicated"}
     except Exception as e:
@@ -559,7 +622,7 @@ async def gns3_start_all_nodes(
 ) -> Dict[str, Any]:
     """Start all nodes in a project."""
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         nodes = await client.get_project_nodes(project_id)
         
         started = []
@@ -593,7 +656,7 @@ async def gns3_stop_all_nodes(
 ) -> Dict[str, Any]:
     """Stop all nodes in a project."""
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         nodes = await client.get_project_nodes(project_id)
         
         stopped = []
@@ -632,7 +695,7 @@ async def gns3_list_links(
     Shows link endpoints, ports, and status.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         links = await client.get_project_links(project_id)
         nodes = await client.get_project_nodes(project_id)
         
@@ -687,7 +750,7 @@ async def gns3_add_link(
         adapter_b, port_b: Adapter and port number on node B
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         link_data = {
             "nodes": [
                 {
@@ -719,7 +782,7 @@ async def gns3_delete_link(
 ) -> Dict[str, Any]:
     """Delete a link between nodes."""
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         await client.delete_link(project_id, link_id)
         return {"status": "success", "message": f"Link {link_id} deleted successfully"}
     except Exception as e:
@@ -741,7 +804,7 @@ async def gns3_get_topology(
     Returns all nodes, links, and project information in one call.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         
         project = await client.get_project(project_id)
         nodes = await client.get_project_nodes(project_id)
@@ -783,17 +846,31 @@ async def _send_console_commands_impl(
     enter_config_mode: bool = False,
     save_config: bool = False,
     enable_password: Optional[str] = None,
+    login_username: Optional[str] = None,
+    login_password: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Internal console command sender (not an MCP tool — safe to await)."""
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
 
         console_info = await client.get_node_console_info(project_id, node_id)
         host = console_info.get("host")
         port = console_info.get("port")
 
         if not host or not port:
-            return {"status": "error", "error": "Node has no console or is not running"}
+            return {
+                "status": "error",
+                "error": "Node has no console or is not running; start it with gns3_start_node first",
+            }
+
+        # Resolve console login credentials (args > env). Never log secrets.
+        resolved_login_user = (
+            login_username if login_username is not None else os.environ.get("GNS3_CONSOLE_USER")
+        )
+        resolved_login_pass = (
+            login_password if login_password is not None else os.environ.get("GNS3_CONSOLE_PASSWORD")
+        )
+        need_login = resolved_login_user is not None or resolved_login_pass is not None
 
         telnet = TelnetClient(host, port, timeout=30.0)
         if not telnet.connect():
@@ -801,8 +878,17 @@ async def _send_console_commands_impl(
 
         try:
             if wait_for_boot:
-                if not telnet.wait_for_boot(timeout=boot_timeout):
+                if not telnet.wait_for_boot(
+                    timeout=boot_timeout,
+                    accept_login_prompts=need_login,
+                ):
                     return {"status": "error", "error": "Timeout waiting for device boot"}
+
+            authenticated = False
+            if need_login:
+                if not telnet.login(resolved_login_user, resolved_login_pass):
+                    return {"status": "error", "error": "Console authentication failed"}
+                authenticated = True
 
             if enter_config_mode:
                 outputs = telnet.send_config_commands(
@@ -822,11 +908,16 @@ async def _send_console_commands_impl(
                     output = telnet.send_cmd(cmd, wait_for=prompts, wait_time=1.0)
                     results.append({"command": cmd, "response": output})
 
-            return {
+            payload: Dict[str, Any] = {
                 "status": "success",
                 "node_name": console_info.get("name"),
                 "results": results,
             }
+            if need_login:
+                payload["authenticated"] = authenticated
+                if resolved_login_user:
+                    payload["login_username"] = resolved_login_user
+            return payload
         finally:
             telnet.close()
 
@@ -848,6 +939,8 @@ async def gns3_send_console_commands(
     enter_config_mode: bool = False,
     save_config: bool = False,
     enable_password: Optional[str] = None,
+    login_username: Optional[str] = None,
+    login_password: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Send commands to a node's console via Telnet.
@@ -859,6 +952,8 @@ async def gns3_send_console_commands(
         enter_config_mode: Automatically enter config mode (Cisco)
         save_config: Save configuration after commands (Cisco)
         enable_password: Enable password if required
+        login_username: Console login username (or GNS3_CONSOLE_USER)
+        login_password: Console login password (or GNS3_CONSOLE_PASSWORD)
     """
     return await _send_console_commands_impl(
         project_id=project_id,
@@ -872,6 +967,8 @@ async def gns3_send_console_commands(
         enter_config_mode=enter_config_mode,
         save_config=save_config,
         enable_password=enable_password,
+        login_username=login_username,
+        login_password=login_password,
     )
 
 @mcp.tool
@@ -890,7 +987,7 @@ async def gns3_get_node_config(
         config_type: "running" or "startup" (Cisco-style devices)
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         console_info = await client.get_node_console_info(project_id, node_id)
         host = console_info.get("host")
         port = console_info.get("port")
@@ -1134,7 +1231,7 @@ async def gns3_list_templates(
     Templates are used to create new nodes quickly.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         templates = await client.get_templates()
         
         templates_summary = []
@@ -1165,7 +1262,7 @@ async def gns3_list_appliances(
     Appliances are pre-configured device definitions that can be installed.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         appliances = await client.get_appliances()
         
         appliances_summary = []
@@ -1196,7 +1293,7 @@ async def gns3_list_snapshots(
 ) -> Dict[str, Any]:
     """List all snapshots for a project."""
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         snapshots = await client.get_snapshots(project_id)
         return {"status": "success", "snapshots": snapshots, "total": len(snapshots)}
     except Exception as e:
@@ -1217,7 +1314,7 @@ async def gns3_create_snapshot(
     Captures current state of all nodes and configuration.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         snapshot = await client.create_snapshot(project_id, snapshot_name)
         return {"status": "success", "snapshot": snapshot}
     except Exception as e:
@@ -1238,7 +1335,7 @@ async def gns3_restore_snapshot(
     WARNING: Current project state will be lost!
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         result = await client.restore_snapshot(project_id, snapshot_id)
         return {"status": "success", "result": result, "message": "Snapshot restored successfully"}
     except Exception as e:
@@ -1256,7 +1353,7 @@ async def gns3_delete_snapshot(
 ) -> Dict[str, Any]:
     """Delete a snapshot permanently."""
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         await client.delete_snapshot(project_id, snapshot_id)
         return {"status": "success", "message": f"Snapshot {snapshot_id} deleted"}
     except Exception as e:
@@ -1285,7 +1382,7 @@ async def gns3_start_capture(
         data_link_type: Data link layer type (default: Ethernet)
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         result = await client.start_capture(project_id, link_id, capture_file_name, data_link_type)
         return {"status": "success", "capture": result, "message": "Packet capture started"}
     except Exception as e:
@@ -1303,7 +1400,7 @@ async def gns3_stop_capture(
 ) -> Dict[str, Any]:
     """Stop packet capture on a link."""
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         result = await client.stop_capture(project_id, link_id)
         return {"status": "success", "message": "Packet capture stopped"}
     except Exception as e:
@@ -1329,7 +1426,7 @@ async def gns3_add_text_annotation(
     Useful for documenting networks and adding labels.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         drawing_data = {
             "svg": f'<text font-family="TypeWriter" font-size="10" fill="#000000">{text}</text>',
             "x": x,
@@ -1366,7 +1463,7 @@ async def gns3_add_shape(
         fill_color: Fill color (hex format, optional)
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         
         if shape_type == "rectangle":
             svg = f'<rect width="{width}" height="{height}" stroke="{color}" fill="{fill_color or "none"}" />'
@@ -1408,7 +1505,7 @@ async def gns3_get_idle_pc_values(
         auto_compute: Automatically compute best idle-pc value
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         
         if auto_compute:
             result = await client.get_node_dynamips_auto_idlepc(project_id, node_id)
@@ -1483,7 +1580,7 @@ async def gns3_validate_topology(
     Checks for disconnected nodes, missing links, and configuration problems.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         
         nodes = await client.get_project_nodes(project_id)
         links = await client.get_project_links(project_id)
@@ -1547,7 +1644,7 @@ async def gns3_save_project(
     project status and optionally creates a named snapshot.
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         project = await client.get_project(project_id)
         snapshot = None
         if snapshot_name:
@@ -1596,7 +1693,7 @@ async def gns3_export_project(
         compression: zip | none | bzip2 | lzma
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         result = await client.export_project(
             project_id=project_id,
             output_path=output_path,
@@ -1630,7 +1727,7 @@ async def gns3_list_images(
         compute_id: Compute id (default 'local')
     """
     try:
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         images = await client.list_images(compute_id=compute_id, emulator=emulator)
         return {
             "status": "success",
@@ -1678,7 +1775,7 @@ async def gns3_import_image(
             return {"status": "error", "error": f"Image file not found: {source_path}"}
 
         remote_name = filename or path.name
-        client = create_client(server_url, username, password)
+        client = await create_client_ready(server_url, username, password)
         result = await client.upload_image(
             compute_id=compute_id,
             emulator=emulator,
@@ -1688,6 +1785,74 @@ async def gns3_import_image(
         return {"status": "success", "import": result}
     except Exception as e:
         logger.error(f"Failed to import image: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# ==================== SSH GUEST ACCESS ====================
+
+@mcp.tool
+async def gns3_ssh_exec(
+    commands: List[str],
+    host: Optional[str] = None,
+    port: int = 22,
+    project_id: Optional[str] = None,
+    node_id: Optional[str] = None,
+    ssh_username: Optional[str] = None,
+    ssh_password: Optional[str] = None,
+    stop_on_error: bool = True,
+    host_key_policy: str = "accept_new",
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Run shell commands on a guest over SSH (password auth).
+
+    Provide ``host`` explicitly, or omit it and pass ``project_id`` + ``node_id``
+    to best-effort resolve an IP from GNS3 node metadata.
+
+    Args:
+        commands: Ordered shell commands to run on one SSH connection
+        host: Guest IP/hostname (preferred)
+        port: SSH port (default 22)
+        project_id: Optional project for node metadata lookup
+        node_id: Optional node for metadata IP discovery
+        ssh_username: Guest SSH user (or GNS3_SSH_USER)
+        ssh_password: Guest SSH password (or GNS3_SSH_PASSWORD)
+        stop_on_error: Stop after first non-zero exit (default True)
+        host_key_policy: accept_new | strict | warn (default accept_new)
+        username/password: GNS3 API auth (not guest credentials)
+    """
+    try:
+        resolved_host = host
+        if not resolved_host:
+            if not project_id or not node_id:
+                return {
+                    "status": "error",
+                    "error": "host is required, or provide project_id and node_id for metadata lookup",
+                }
+            client = await create_client_ready(server_url, username, password)
+            node = await client.get_node(project_id, node_id)
+            ips = ssh_helpers.extract_ips_from_node(node if isinstance(node, dict) else {})
+            if not ips:
+                return {
+                    "status": "error",
+                    "error": "Could not resolve guest IP from node metadata; pass host explicitly",
+                }
+            resolved_host = ips[0]
+
+        user, passwd = ssh_helpers.resolve_ssh_credentials(ssh_username, ssh_password)
+        return await ssh_helpers.exec_commands(
+            resolved_host,
+            commands,
+            port=port,
+            username=user,
+            password=passwd,
+            stop_on_error=stop_on_error,
+            host_key_policy=host_key_policy,
+        )
+    except Exception as e:
+        logger.error(f"Failed SSH exec: {e}")
         return {"status": "error", "error": str(e)}
 
 

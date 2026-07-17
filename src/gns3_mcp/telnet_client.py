@@ -113,59 +113,191 @@ class TelnetClient:
             logger.error(f"Send error: {e}")
             return ""
 
-    def wait_for_boot(self, timeout: int = 120, additional_prompts: Optional[List[str]] = None) -> bool:
-        """Wait for device to boot and show a prompt."""
+    def wait_for_boot(
+        self,
+        timeout: int = 120,
+        additional_prompts: Optional[List[str]] = None,
+        accept_login_prompts: bool = True,
+    ) -> bool:
+        """Wait for device to boot and show a prompt or login screen."""
         if not self.sock or not self.connected:
             return False
-            
+
         start_time = time.time()
         # Common prompts across different device types
         prompts = [
-            ">", "#",  # Cisco/IOS
-            "PC1>", "PC2>", "PC3>", "PC4>",  # VPCS
-            "Laptop1>", "Laptop2>",  # VPCS laptops
-            "Router>", "Router#",  # Generic routers
-            "Switch>", "Switch#",  # Generic switches
-            "$", "%",  # Linux/Unix
-            "[yes/no]:", "[confirm]",  # Cisco prompts
+            ">",
+            "#",  # Cisco/IOS
+            "PC1>",
+            "PC2>",
+            "PC3>",
+            "PC4>",  # VPCS
+            "Laptop1>",
+            "Laptop2>",  # VPCS laptops
+            "Router>",
+            "Router#",  # Generic routers
+            "Switch>",
+            "Switch#",  # Generic switches
+            "$",
+            "%",  # Linux/Unix
+            "[yes/no]:",
+            "[confirm]",  # Cisco prompts
         ]
-        
+        login_markers = [
+            "Username:",
+            "username:",
+            "login:",
+            "Login:",
+            "Password:",
+            "password:",
+        ]
+        if accept_login_prompts:
+            prompts = prompts + login_markers
+
         if additional_prompts:
             prompts.extend(additional_prompts)
-        
+
         while time.time() - start_time < timeout:
             try:
                 self.sock.send(b"\r")
                 res = self.read_until(prompts, timeout=2)
-                
+
                 # Handle initial config dialog
                 if "[yes/no]:" in res or "yes/no" in res.lower():
                     logger.info("Initial Config Dialog detected. Sending 'no'.")
                     self.sock.send(b"no\r")
                     time.sleep(5)
                     continue
-                
+
                 # Handle confirm prompts
                 if "[confirm]" in res:
                     logger.info("Confirm prompt detected. Sending enter.")
                     self.sock.send(b"\r")
                     time.sleep(2)
                     continue
-                
+
+                # Login screen counts as "ready enough" when credentials will be used next
+                lower = res.lower()
+                if accept_login_prompts and any(
+                    m.lower() in lower
+                    for m in ("username:", "login:", "password:")
+                ):
+                    logger.info("Login prompt detected during boot wait")
+                    return True
+
                 # Check if we got a valid prompt
                 if any(p in res for p in prompts if p not in ["[yes/no]:", "[confirm]"]):
-                    logger.info(f"Device prompt detected, boot complete")
+                    logger.info("Device prompt detected, boot complete")
                     return True
-                
+
                 time.sleep(1)
-                
+
             except Exception as e:
                 logger.error(f"Error waiting for boot: {e}")
                 time.sleep(1)
                 continue
-            
+
         logger.error(f"Timeout waiting for device boot after {timeout}s")
         return False
+
+    def login(
+        self,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        timeout: float = 15.0,
+    ) -> bool:
+        """Best-effort console login for Username/login/Password prompts.
+
+        Returns True if already at a shell/enable prompt or login appears successful.
+        Never logs credentials.
+        """
+        if not self.sock or not self.connected:
+            return False
+
+        shell_markers = [">", "#", "$", "%"]
+        user_markers = ["Username:", "username:", "login:", "Login:"]
+        pass_markers = ["Password:", "password:"]
+        any_markers = user_markers + pass_markers + shell_markers
+
+        def _has_shell(text: str) -> bool:
+            stripped = (text or "").strip()
+            if not stripped:
+                return False
+            last = stripped.splitlines()[-1]
+            # Login/password prompts end with ':' — not a shell.
+            if last.rstrip().endswith(":"):
+                return False
+            for m in shell_markers:
+                if m in last or m in stripped:
+                    # Ignore shell chars that appear only inside login banners
+                    if any(um in text for um in user_markers + pass_markers):
+                        # If last line is still a login prompt, not shell
+                        if any(um in last for um in user_markers + pass_markers):
+                            return False
+                        if last.rstrip().endswith(":"):
+                            return False
+                    return True
+            return False
+
+        def _at_login(text: str) -> bool:
+            return any(m in (text or "") for m in user_markers + pass_markers)
+
+        try:
+            self.sock.send(b"\r")
+            buf = self.read_until(any_markers, timeout=min(timeout, 5.0))
+
+            if _has_shell(buf) and not _at_login(buf):
+                logger.info("Console already at shell prompt; login not required")
+                return True
+
+            if any(m in buf for m in user_markers):
+                if not username:
+                    logger.error("Login username required but not provided")
+                    return False
+                logger.debug("Sending console username")
+                self.sock.send(f"{username}\r".encode())
+                buf = self.read_until(pass_markers + shell_markers, timeout=5.0)
+
+            if any(m in buf for m in pass_markers):
+                if password is None:
+                    logger.error("Login password required but not provided")
+                    return False
+                logger.debug("Sending console password")
+                self.sock.send(f"{password}\r".encode())
+                buf = self.read_until(shell_markers + user_markers + pass_markers, timeout=5.0)
+
+            # Clear failure: still sitting at login/password
+            if _at_login(buf) and not _has_shell(buf):
+                logger.error("Console authentication failed")
+                return False
+
+            if _has_shell(buf):
+                logger.info("Console login completed")
+                return True
+
+            # Some devices need a second enter after auth
+            self.sock.send(b"\r")
+            buf = self.read_until(shell_markers + user_markers + pass_markers, timeout=3.0)
+
+            if _at_login(buf) and not _has_shell(buf):
+                logger.error("Console authentication failed")
+                return False
+
+            if _has_shell(buf):
+                logger.info("Console login completed")
+                return True
+
+            # No login markers and no clear shell — treat as soft success
+            # (e.g. empty banner devices that only need credentials once).
+            if not _at_login(buf):
+                logger.info("Console login completed (no login prompt remaining)")
+                return True
+
+            logger.error("Console login timed out or failed")
+            return False
+        except Exception as e:
+            logger.error("Console login error: %s", e)
+            return False
 
     def enter_config_mode(self, enable_password: Optional[str] = None) -> bool:
         """Enter privileged and configuration mode (Cisco-style)."""

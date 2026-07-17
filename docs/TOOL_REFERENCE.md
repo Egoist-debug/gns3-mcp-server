@@ -13,7 +13,31 @@ gemini mcp add gns3 "path/to/gns3-mcp-server3/run.bat"
 
 ## 📚 Available Tools (40+ Tools)
 
-### 🖥️ Server & Compute Management (2 tools)
+### 🖥️ Server & Compute Management (3 tools)
+
+#### `gns3_ensure_server`
+Probe the GNS3 server and auto-start it when the target is **localhost**.
+```
+Args:
+  - server_url: GNS3 REST base URL (default http://localhost:3080)
+  - username/password: Optional GNS3 API auth
+  - force: Bypass healthy cache and re-probe (default: false)
+
+Behavior:
+  - Localhost/127.0.0.1/::1 down → run GNS3_SERVER_START_CMD or `gns3server`
+    (default binary gets --host/--port from server_url)
+  - Remote URL down → error only (never spawns local process)
+  - Spawned process is detached and left running
+  - Process-wide lock + 30s healthy cache
+
+Returns:
+  status, already_running, started, server_url, server_info,
+  start_command, wait_seconds, error?
+
+Env:
+  GNS3_SERVER_URL, GNS3_SERVER_START_CMD, GNS3_SERVER_START_TIMEOUT,
+  GNS3_SERVER_HEALTHY_CACHE_SECONDS
+```
 
 #### `gns3_get_server_info`
 Get GNS3 server version and capabilities.
@@ -157,16 +181,23 @@ Returns:
 ### 💻 Console & Configuration (3 tools)
 
 #### `gns3_send_console_commands`
-Send CLI commands to a device.
+Send CLI commands to a device console via Telnet.
 ```
 Args:
-  - project_id, node_id: Target device
+  - project_id, node_id: Target device (must be started)
   - commands: List of commands
   - wait_for_boot: Wait for device boot (default: true)
   - boot_timeout: Boot wait timeout in seconds (default: 120)
   - enter_config_mode: Auto enter config mode (default: false)
   - save_config: Save after commands (default: false)
   - enable_password: Enable password if needed
+  - login_username: Console login user (or GNS3_CONSOLE_USER)
+  - login_password: Console login password (or GNS3_CONSOLE_PASSWORD)
+
+Notes:
+  - username/password on this tool are GNS3 API auth, not console login
+  - Login handles Username:/login:/Password: heuristics
+  - Does not auto-start the node; use gns3_start_node first
 
 Example:
 {
@@ -176,7 +207,9 @@ Example:
     "no shutdown"
   ],
   "enter_config_mode": true,
-  "save_config": true
+  "save_config": true,
+  "login_username": "admin",
+  "login_password": "cisco"
 }
 ```
 
@@ -217,6 +250,30 @@ Example - Configure OSPF:
   },
   "save_config": true
 }
+```
+
+
+### 🔐 SSH Guest Access (1 tool)
+
+#### `gns3_ssh_exec`
+Run shell commands on a guest VM/host over SSH (password auth).
+```
+Args:
+  - commands: List of shell commands (one SSH connection)
+  - host: Guest IP/hostname (preferred)
+  - port: SSH port (default 22)
+  - project_id, node_id: Optional; best-effort IP from GNS3 node metadata if host omitted
+  - ssh_username: Guest user (or GNS3_SSH_USER)
+  - ssh_password: Guest password (or GNS3_SSH_PASSWORD)
+  - stop_on_error: Stop after first non-zero exit (default true)
+  - host_key_policy: accept_new | strict | warn (default accept_new)
+  - username/password: GNS3 API auth for metadata lookup only
+
+Returns per command: {command, stdout, stderr, exit_code}
+Passwords are never returned in the payload.
+
+Env:
+  GNS3_SSH_USER, GNS3_SSH_PASSWORD, GNS3_SSH_HOST_KEY_POLICY
 ```
 
 ---
