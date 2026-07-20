@@ -241,6 +241,23 @@ class TelnetOutputTests(unittest.TestCase):
         self.assertNotIn("R1#", text)
         self.assertFalse(meta["completed"])
 
+    def test_send_cmd_timeout_without_prompt_not_completed(self):
+        # wait_for set but no first-prompt split (timeout): even after clean
+        # turns control chars into a prompt-looking line, completed stays False.
+        c = self._client(
+            [
+                "partial body\nR1#\x00",
+                socket.timeout("idle"),
+            ]
+        )
+        text, meta = c.send_cmd(
+            "show", wait_for=["#", ">"], timeout=0.05, return_meta=True
+        )
+        self.assertIn("partial body", text)
+        # shape still strips a cleaned trailing prompt line if present
+        self.assertNotIn("\x00", text)
+        self.assertFalse(meta["completed"])
+
     def test_send_cmd_sonic_ansi_prompt_pairs(self):
         p = "\x1b[01;32madmin@sonic\x1b[00m:\x1b[01;34m~\x1b[00m$"
         c = self._client(

@@ -469,15 +469,39 @@ class TelnetClient:
         line_oriented: bool = True,
         handle_pager: bool = True,
         max_bytes: Optional[int] = None,
-    ) -> str:
+        return_framed: bool = False,
+    ):
         """Read until first shell/config prompt (line-oriented) or timeout.
 
         Line-oriented mode completes on the **first** prompt line and stashes
         any remainder in the residual RX buffer for subsequent reads. This
         keeps multi-command output paired with the correct command.
+
+        When ``return_framed=True``, returns ``(text, framed)`` where ``framed``
+        is True only if line-oriented ``split_at_first_prompt`` succeeded
+        (not timeout / partial buffer).
         """
+        text, framed = self._read_until_result(
+            valid_end_chars,
+            timeout,
+            line_oriented=line_oriented,
+            handle_pager=handle_pager,
+            max_bytes=max_bytes,
+        )
+        return (text, framed) if return_framed else text
+
+    def _read_until_result(
+        self,
+        valid_end_chars: Optional[List[str]] = None,
+        timeout: Optional[float] = None,
+        *,
+        line_oriented: bool = True,
+        handle_pager: bool = True,
+        max_bytes: Optional[int] = None,
+    ) -> Tuple[str, bool]:
+        """Read until first prompt; ``framed`` is True only on a real split."""
         if not self.sock or not self.connected:
-            return ""
+            return "", False
 
         timeout = timeout if timeout is not None else self.timeout
         cap = max_bytes if max_bytes is not None else self.max_response_bytes
@@ -498,11 +522,12 @@ class TelnetClient:
             if split is not None:
                 complete, remainder = split
                 self._push_rx(remainder)
-                return complete
+                return complete, True
         else:
             for end_char in markers:
                 if end_char and end_char in buf:
-                    return buf
+                    # Marker match without first-prompt split is not framed.
+                    return buf, False
 
         while time.time() - start_time < timeout:
             try:
@@ -527,11 +552,11 @@ class TelnetClient:
                     if split is not None:
                         complete, remainder = split
                         self._push_rx(remainder)
-                        return complete
+                        return complete, True
                 else:
                     for end_char in markers:
                         if end_char and end_char in buf:
-                            return buf
+                            return buf, False
 
                 if not chunk:
                     time.sleep(0.05)
@@ -539,8 +564,8 @@ class TelnetClient:
                 logger.error(f"Read error: {e}")
                 break
 
-        # Timeout: return everything read; residual stays empty for this partial.
-        return buf
+        # Timeout / partial: no first-prompt split.
+        return buf, False
 
     def read_available(self, wait_time: float = 0.5, idle_gap: float = 0.2) -> str:
         """Read available data until idle gap after initial wait."""
@@ -586,14 +611,10 @@ class TelnetClient:
         framed: bool = False,
     ) -> Tuple[str, Dict[str, Any]]:
         cleaned = clean_console_text(raw)
-        # Only first-prompt framing (read_until) can prove completion. Idle
-        # reads (wait_for=None / read_available) must not treat body lines that
-        # merely look like prompts as completed.
-        completed = bool(
-            framed
-            and cleaned
-            and looks_like_shell_prompt(_last_nonempty_line(cleaned))
-        )
+        # ``framed`` means first-prompt split succeeded (not merely that
+        # read_until was called). Idle reads and timeouts stay completed=False
+        # even if cleaned body happens to end with a prompt-looking line.
+        completed = bool(framed)
         if shape:
             cleaned = shape_command_response(cleaned, cmd=cmd)
         text, meta = apply_response_cap(cleaned, self.max_response_bytes)
@@ -612,9 +633,10 @@ class TelnetClient:
         """Send a command and wait for response.
 
         By default the returned text is shaped to remove the command echo and
-        trailing completion prompt. Completion is exposed as meta
-        ``completed`` when ``return_meta=True``. Internal control paths may set
-        ``shape_response=False`` when they inspect raw prompt markers.
+        trailing completion prompt. Meta ``completed`` is True only when
+        ``wait_for`` was set **and** first-prompt framing split succeeded.
+        Internal control paths may set ``shape_response=False`` when they
+        inspect raw prompt markers.
         Returns cleaned text, or (text, meta) when return_meta=True.
         """
         if not self.sock or not self.connected:
@@ -636,8 +658,11 @@ class TelnetClient:
             logger.debug(f"Sent command: {cmd}")
 
             if wait_for is not None:
-                raw = self.read_until(wait_for, timeout=timeout or self.timeout)
-                framed = True
+                raw, framed = self.read_until(
+                    wait_for,
+                    timeout=timeout or self.timeout,
+                    return_framed=True,
+                )
             else:
                 raw = self.read_available(wait_time)
                 framed = False
