@@ -11,6 +11,23 @@ run.bat  # Windows
 gemini mcp add gns3 "path/to/gns3-mcp-server3/run.bat"
 ```
 
+
+## Goal tools (preferred playbook entry)
+
+| Tool | Playbook |
+|------|----------|
+| `gns3_prepare_lab` | Bootstrap lab / project |
+| `gns3_build_topology` | Build topology |
+| `gns3_configure_devices` | Configure devices (pure-body console) |
+| `gns3_diagnose_connectivity` | Diagnose connectivity |
+| `gns3_run_guest_commands` | Guest SSH |
+| `gns3_prepare_image` | Image import + Idle-PC (densify yellow) |
+| `gns3_manage_snapshot` | Snapshot ops + confirmation tokens |
+| `gns3_finish_lab` | Session cleanup (ask + token) |
+
+Status values for goals: `success | error | partial | confirmation_required | conflict`.
+Console expert tool responses are pure command body; `completed` is true only after first-prompt framing.
+
 ## 📚 Available Tools (40+ Tools)
 
 ### 🖥️ Server & Compute Management (5 tools)

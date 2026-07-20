@@ -2,13 +2,16 @@
 
 Canonical tool names: `gns3_*`. On Oh My Pi this lab maps to `mcp__gns_*` / `xd://mcp__gns_*`.
 
-IDs only from prior MCP results or user paste. First GNS3 call in a session: `gns3_ensure_server`.
+**Prefer the goal tool** for each playbook. Expert tools remain for partial/custom work.
+IDs only from prior MCP results or user paste when using expert tools. Goal tools resolve names.
 
 ---
 
 ## 1. Bootstrap lab / project
 
-**Goal:** Healthy GNS3 + open working project.
+**Goal tool:** `gns3_prepare_lab` (`project_name` or `project_id`)
+
+**Expert fallback:**
 
 1. `gns3_ensure_server`
 2. `gns3_get_server_info` (optional sanity)
@@ -23,7 +26,9 @@ IDs only from prior MCP results or user paste. First GNS3 call in a session: `gn
 
 ## 2. Build topology (nodes + links)
 
-**Goal:** Devices placed and cabled as requested.
+**Goal tool:** `gns3_build_topology` (`project_*`, `nodes`, `links`, optional `start`/`validate`)
+
+**Expert fallback:**
 
 1. Complete playbook 1 if needed
 2. `gns3_list_templates` — pick `template_id` by name/type (never invent)
@@ -42,7 +47,9 @@ IDs only from prior MCP results or user paste. First GNS3 call in a session: `gn
 
 ## 3. Configure devices
 
-**Goal:** Intended config on one or more nodes.
+**Goal tool:** `gns3_configure_devices` (`targets` with `node_name` + `commands` or `template_name`). Console bodies are pure text + `completed`.
+
+**Expert fallback:**
 
 1. Resolve `node_id` via `gns3_list_nodes` (by name)
 2. Ensure node is started if console needs it (`gns3_start_node` / status from list)
@@ -58,7 +65,9 @@ IDs only from prior MCP results or user paste. First GNS3 call in a session: `gn
 
 ## 4. Diagnose connectivity
 
-**Goal:** Find why path/protocol fails using MCP only.
+**Goal tool:** `gns3_diagnose_connectivity` (validate + optional `suspect_nodes` probes). Findings cite MCP evidence only; no auto-remediation.
+
+**Expert fallback:**
 
 1. `gns3_ensure_server` if not yet this session
 2. `gns3_validate_topology`
@@ -74,22 +83,24 @@ IDs only from prior MCP results or user paste. First GNS3 call in a session: `gn
 
 ## 5. Guest SSH / host-style ops (e.g. SONiC VS)
 
-**Goal:** Run shell commands on a guest, not IOS console.
+**Goal tool:** `gns3_run_guest_commands` (`host` or project+node; never returns passwords).
+
+**Expert fallback:**
 
 1. Resolve node; ensure it is started and has management reachability
 2. Prefer `gns3_ssh_exec` with explicit `host` when known; else `project_id` + `node_id` for metadata IP discovery
 3. Pass `ssh_username` / `ssh_password` or rely on `GNS3_SSH_*` env — never echo passwords
 4. Use console (`gns3_send_console_commands`) only if SSH is the wrong plane for that image
 
-**Done when:** Command results from `gns3_ssh_exec` (or justified console path) answer the ask.
+**Done when:** Command results from the goal tool or `gns3_ssh_exec` (or justified console path) answer the ask.
 
 ---
 
 ## 6. Image import + densify + Idle-PC
 
-**Goal:** Image in GNS3 store; Dynamips templates dense and idle-pc set **as far as MCP allows**.
+**Goal tool:** `gns3_prepare_image` (idempotent import; optional Idle-PC; densify stays yellow + escape note).
 
-### Green path
+**Expert green path:**
 
 1. `gns3_ensure_server`
 2. `gns3_import_image` (`source_path`, `emulator`: `qemu` | `dynamips` | `iou`)
@@ -118,7 +129,9 @@ MCP does **not** yet expose create/update template tools (see `capability-matrix
 
 ## 7. Snapshot / reset clean state
 
-**Goal:** Checkpoint or roll back safely.
+**Goal tool:** `gns3_manage_snapshot` (`operation` create|list|restore|delete_snapshot|delete_project). Destructive ops: preview → user confirm → `confirmation_token`.
+
+**Expert fallback:**
 
 1. Resolve `project_id`
 2. **Create:** `gns3_create_snapshot` with a clear name (e.g. `Clean_State`, `Before_OSPF`)
@@ -136,7 +149,9 @@ MCP does **not** yet expose create/update template tools (see `capability-matrix
 
 ## 8. Session cleanup (ask first)
 
-**Goal:** End lab work without leaving open projects or a local gns3server running **unless the user wants them**.
+**Goal tool:** `gns3_finish_lab` (defaults all false; destructive flags need token after user yes).
+
+**Expert fallback:**
 
 1. Confirm the lab goal for this turn is done (topology/config/verify complete).
 2. **Ask the user** two questions (can be one message):
@@ -144,9 +159,8 @@ MCP does **not** yet expose create/update template tools (see `capability-matrix
    - Stop the GNS3 server?
 3. Only after explicit answers, act via MCP:
    - Close only: `gns3_close_project(project_id)` **or** `gns3_cleanup_session(project_id=…, close_project=true)`
-   - Stop server only: `gns3_stop_server` **or** `gns3_cleanup_session(stop_server=true)`  
-     (stop-server-only must not go through ensure — cleanup tool already avoids restart)
-   - Both / plus stop nodes: `gns3_cleanup_session(project_id=…, stop_nodes=?, close_project=?, stop_server=?)` with flags matching consent
+   - Stop server only: `gns3_stop_server` **or** `gns3_cleanup_session(stop_server=true)`
+   - Both / plus stop nodes: `gns3_cleanup_session` with flags matching consent
 4. Remote `server_url`: stop_server is refused by the tool — report that; only close_project may apply.
 5. Never delete the project as part of “cleanup” unless the user separately confirmed `gns3_delete_project`.
 

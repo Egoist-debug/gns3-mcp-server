@@ -2060,6 +2060,307 @@ async def gns3_ssh_exec(
         return {"status": "error", "error": str(e)}
 
 
+# ==================== GOAL WORKFLOW TOOLS ====================
+
+
+@mcp.tool
+async def gns3_prepare_lab(
+    project_name: Optional[str] = None,
+    project_id: Optional[str] = None,
+    create_if_missing: bool = True,
+    open_project: bool = True,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    force_ensure: bool = False,
+) -> Dict[str, Any]:
+    """Ensure server, resolve/create project by name, open it, return project_id + step trace.
+
+    Preferred entry for bootstrap lab / project playbook.
+    """
+    try:
+        from .workflow.goals.prepare_lab import prepare_lab_goal
+
+        return await prepare_lab_goal(
+            project_name=project_name,
+            project_id=project_id,
+            create_if_missing=create_if_missing,
+            open_project=open_project,
+            server_url=server_url,
+            username=username,
+            password=password,
+            force_ensure=force_ensure,
+        )
+    except Exception as e:
+        logger.error(f"gns3_prepare_lab failed: {e}")
+        return {"status": "error", "goal": "prepare_lab", "error": str(e), "steps": []}
+
+
+@mcp.tool
+async def gns3_build_topology(
+    project_name: Optional[str] = None,
+    project_id: Optional[str] = None,
+    nodes: Optional[List[Dict[str, Any]]] = None,
+    links: Optional[List[Dict[str, Any]]] = None,
+    start: bool = False,
+    validate: bool = True,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Converge nodes/links by natural keys; optional start + validate. Observe-converge fail-stop.
+
+    Preferred entry for build topology playbook.
+    """
+    try:
+        from .workflow.goals.build_topology import build_topology_goal
+
+        return await build_topology_goal(
+            project_name=project_name,
+            project_id=project_id,
+            nodes=nodes,
+            links=links,
+            start=start,
+            validate=validate,
+            server_url=server_url,
+            username=username,
+            password=password,
+        )
+    except Exception as e:
+        logger.error(f"gns3_build_topology failed: {e}")
+        return {"status": "error", "goal": "build_topology", "error": str(e), "steps": []}
+
+
+@mcp.tool
+async def gns3_configure_devices(
+    project_name: Optional[str] = None,
+    project_id: Optional[str] = None,
+    targets: Optional[List[Dict[str, Any]]] = None,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Configure devices by name via console (pure-body responses) or config templates.
+
+    Preferred entry for configure devices playbook. Fail-stop across targets.
+    """
+    try:
+        from .workflow.goals.configure_devices import configure_devices_goal
+
+        return await configure_devices_goal(
+            project_name=project_name,
+            project_id=project_id,
+            targets=targets,
+            server_url=server_url,
+            username=username,
+            password=password,
+        )
+    except Exception as e:
+        logger.error(f"gns3_configure_devices failed: {e}")
+        return {"status": "error", "goal": "configure_devices", "error": str(e), "steps": []}
+
+
+@mcp.tool
+async def gns3_diagnose_connectivity(
+    project_name: Optional[str] = None,
+    project_id: Optional[str] = None,
+    suspect_nodes: Optional[List[Dict[str, Any]]] = None,
+    probe_commands: Optional[List[str]] = None,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate topology and optionally probe suspects; findings cite tool evidence only.
+
+    Preferred entry for diagnose connectivity playbook. No automatic remediation.
+    """
+    try:
+        from .workflow.goals.diagnose_connectivity import diagnose_connectivity_goal
+
+        return await diagnose_connectivity_goal(
+            project_name=project_name,
+            project_id=project_id,
+            suspect_nodes=suspect_nodes,
+            probe_commands=probe_commands,
+            server_url=server_url,
+            username=username,
+            password=password,
+        )
+    except Exception as e:
+        logger.error(f"gns3_diagnose_connectivity failed: {e}")
+        return {
+            "status": "error",
+            "goal": "diagnose_connectivity",
+            "error": str(e),
+            "steps": [],
+        }
+
+
+@mcp.tool
+async def gns3_run_guest_commands(
+    commands: Optional[List[str]] = None,
+    host: Optional[str] = None,
+    port: int = 22,
+    project_name: Optional[str] = None,
+    project_id: Optional[str] = None,
+    node_name: Optional[str] = None,
+    node_id: Optional[str] = None,
+    ssh_username: Optional[str] = None,
+    ssh_password: Optional[str] = None,
+    stop_on_error: bool = True,
+    host_key_policy: str = "accept_new",
+    connect_timeout: Optional[float] = None,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Run guest SSH commands via host or project+node IP resolution. Never returns passwords.
+
+    Preferred entry for guest SSH / host-style ops playbook.
+    """
+    try:
+        from .workflow.goals.run_guest_commands import run_guest_commands_goal
+
+        return await run_guest_commands_goal(
+            commands=commands,
+            host=host,
+            port=port,
+            project_name=project_name,
+            project_id=project_id,
+            node_name=node_name,
+            node_id=node_id,
+            ssh_username=ssh_username,
+            ssh_password=ssh_password,
+            stop_on_error=stop_on_error,
+            host_key_policy=host_key_policy,
+            connect_timeout=connect_timeout,
+            server_url=server_url,
+            username=username,
+            password=password,
+        )
+    except Exception as e:
+        logger.error(f"gns3_run_guest_commands failed: {e}")
+        return {
+            "status": "error",
+            "goal": "run_guest_commands",
+            "error": str(e),
+            "steps": [],
+        }
+
+
+@mcp.tool
+async def gns3_prepare_image(
+    source_path: Optional[str] = None,
+    emulator: str = "qemu",
+    filename: Optional[str] = None,
+    compute_id: str = "local",
+    idle_pc_project_name: Optional[str] = None,
+    idle_pc_project_id: Optional[str] = None,
+    idle_pc_node_name: Optional[str] = None,
+    idle_pc_node_id: Optional[str] = None,
+    densify_template: bool = False,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Idempotent image import; optional Dynamips Idle-PC; densify stays yellow with escape note.
+
+    Preferred entry for image import + densify + Idle-PC playbook.
+    """
+    try:
+        from .workflow.goals.prepare_image import prepare_image_goal
+
+        return await prepare_image_goal(
+            source_path=source_path,
+            emulator=emulator,
+            filename=filename,
+            compute_id=compute_id,
+            idle_pc_project_name=idle_pc_project_name,
+            idle_pc_project_id=idle_pc_project_id,
+            idle_pc_node_name=idle_pc_node_name,
+            idle_pc_node_id=idle_pc_node_id,
+            densify_template=densify_template,
+            server_url=server_url,
+            username=username,
+            password=password,
+        )
+    except Exception as e:
+        logger.error(f"gns3_prepare_image failed: {e}")
+        return {"status": "error", "goal": "prepare_image", "error": str(e), "steps": []}
+
+
+@mcp.tool
+async def gns3_manage_snapshot(
+    operation: str,
+    project_name: Optional[str] = None,
+    project_id: Optional[str] = None,
+    snapshot_name: Optional[str] = None,
+    snapshot_id: Optional[str] = None,
+    confirmation_token: Optional[str] = None,
+    safety_snapshot_name: Optional[str] = None,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Snapshot create/list or restore/delete with one-time confirmation tokens.
+
+    Preferred entry for snapshot / reset playbook. Destructive ops need token.
+    """
+    try:
+        from .workflow.goals.manage_snapshot import manage_snapshot_goal
+
+        return await manage_snapshot_goal(
+            operation=operation,
+            project_name=project_name,
+            project_id=project_id,
+            snapshot_name=snapshot_name,
+            snapshot_id=snapshot_id,
+            confirmation_token=confirmation_token,
+            safety_snapshot_name=safety_snapshot_name,
+            server_url=server_url,
+            username=username,
+            password=password,
+        )
+    except Exception as e:
+        logger.error(f"gns3_manage_snapshot failed: {e}")
+        return {"status": "error", "goal": "manage_snapshot", "error": str(e), "steps": []}
+
+
+@mcp.tool
+async def gns3_finish_lab(
+    project_name: Optional[str] = None,
+    project_id: Optional[str] = None,
+    stop_nodes: bool = False,
+    close_project: bool = False,
+    stop_server: bool = False,
+    confirmation_token: Optional[str] = None,
+    server_url: str = "http://localhost:3080",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Session cleanup with defaults all false; destructive flags require confirmation token.
+
+    Preferred entry for finish lab / cleanup playbook. Never auto-stops without flags+token.
+    """
+    try:
+        from .workflow.goals.finish_lab import finish_lab_goal
+
+        return await finish_lab_goal(
+            project_name=project_name,
+            project_id=project_id,
+            stop_nodes=stop_nodes,
+            close_project=close_project,
+            stop_server=stop_server,
+            confirmation_token=confirmation_token,
+            server_url=server_url,
+            username=username,
+            password=password,
+        )
+    except Exception as e:
+        logger.error(f"gns3_finish_lab failed: {e}")
+        return {"status": "error", "goal": "finish_lab", "error": str(e), "steps": []}
+
+
 # ==================== MAIN ====================
 
 if __name__ == "__main__":

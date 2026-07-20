@@ -14,6 +14,7 @@ Tool names below are canonical `gns3_*`. Apply host prefixes as needed.
 
 | Job | Primary tools |
 |-----|----------------|
+| **Playbook goal tools (preferred)** | `gns3_prepare_lab`, `gns3_build_topology`, `gns3_configure_devices`, `gns3_diagnose_connectivity`, `gns3_run_guest_commands`, `gns3_prepare_image`, `gns3_manage_snapshot`, `gns3_finish_lab` (tokens for destructive; densify still yellow inside prepare_image) |
 | Probe / auto-start local GNS3 | `gns3_ensure_server`, `gns3_get_server_info`, `gns3_list_computes` |
 | Stop local GNS3 server / session cleanup | `gns3_stop_server` (localhost port → SIGTERM→SIGKILL), `gns3_cleanup_session` (optional stop_nodes / close_project / stop_server; ask user first) |
 | Project lifecycle | `gns3_list_projects`, `gns3_create_project`, `gns3_get_project`, `gns3_update_project`, `gns3_open_project`, `gns3_close_project`, `gns3_duplicate_project`, `gns3_save_project` |

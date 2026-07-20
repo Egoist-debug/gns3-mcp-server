@@ -18,7 +18,7 @@ Load and follow this skill for any of:
 
 ## Hard rules
 
-1. **MCP-first.** Every GNS3 control-plane or device-access action goes through a `gns3_*` MCP tool (host may prefix it; see mapping below).
+1. **MCP-first.** Prefer the **8 goal tools** for standard lab playbooks; use expert `gns3_*` tools when goals do not fit. Every GNS3 action still goes through MCP (host may prefix names; see mapping).
 2. **Forbidden without the escape ritual:**
    - HTTP to GNS3 (`:3080`, `/v2/...`) via curl/httpx/requests/fetch/etc.
    - Raw telnet/console when `gns3_send_console_commands` can do the job
@@ -31,18 +31,11 @@ Load and follow this skill for any of:
    - Local filesystem for image paths, export destinations, reading capture files
    - Non-GNS3 work (git, unrelated code, general shell)
    - Editing `gns3-mcp-server` source when the **task is developing the MCP server** (tests of the server are fine; still do not drive a live lab around MCP tools)
-4. **IDs are provenance-only.** `project_id`, `node_id`, `link_id`, `template_id`, `snapshot_id`, adapter/port numbers, and similar must come from a prior MCP result in this session or from the user. Never invent UUIDs. User says “R1” → `gns3_list_nodes` (or topology) and match by name before acting. Refresh with list/get tools if state may be stale. For links, take adapter/port from `gns3_get_node` when needed.
-5. **Session open.** The first GNS3 action in a conversation is `gns3_ensure_server`. Later GNS3 calls may skip a separate ensure.
-6. **Session close (ask first).** When GNS3 lab work for the turn/session is **complete**, **before** ending:
-   1. Ask whether to **close the current project** (`gns3_close_project` or `gns3_cleanup_session(close_project=true, …)`).
-   2. Ask whether to **stop the GNS3 server** (`gns3_stop_server` or `gns3_cleanup_session(stop_server=true, …)`).
-   3. Execute **only** the actions the user accepts, via MCP. Defaults on cleanup flags are all false — never invent consent.
-   4. Do **not** auto-close projects or stop the server without an explicit yes in this conversation.
-7. **Secrets.** Use env / host MCP config. Document variable **names** only. Never print `GNS3_PASSWORD`, console passwords, or SSH passwords. Never commit secrets into skill or repo files. Examples use placeholders only.
-8. **Destructive ops.**
-   - Confirm with the user before: `gns3_delete_project`, `gns3_restore_snapshot`, `gns3_export_project`, and (via session close) `gns3_stop_server` / closing a project the user did not just request to close
-   - Node/link delete is OK when the user asked for that topology change
-   - Before `gns3_restore_snapshot`, create a safety snapshot when possible
+4. **IDs are provenance-only.** Goal tools resolve names internally; for expert tools, `project_id` / `node_id` / etc. must come from a prior MCP result or the user. Never invent UUIDs.
+5. **Session open.** Prefer `gns3_prepare_lab` (includes ensure). If using expert tools only, first GNS3 action is `gns3_ensure_server`.
+6. **Session close (ask first).** Prefer `gns3_finish_lab` after user intent: defaults all false; destructive flags require a one-time `confirmation_token` from a preview call. Expert path: ask close/stop, then `gns3_cleanup_session` / discrete tools. Never auto-close or auto-stop without explicit yes.
+7. **Secrets.** Use env / host MCP config. Document variable **names** only. Never print passwords. Console `results[].response` is **pure command body** (no completion prompt / username); completion is `completed` bool when first-prompt framing succeeded.
+8. **Destructive ops + tokens.** `gns3_manage_snapshot` / `gns3_finish_lab` (and other destructive goal actions) return `status: confirmation_required` with `confirmation_token` bound to action+target. Re-call with the token only after **user** confirms. Bare `confirm=true` is not authorization. Expert delete/restore still needs user confirm in chat.
 
 ## Escape ritual (only path around MCP)
 
@@ -54,26 +47,38 @@ Use only when a required `gns3_*` tool is missing or returns a hard failure, or 
 
 No silent fallback. No session-wide “I may use Python now” without a fresh allow for the action. Yellow ≠ auto-escape.
 
+## Preferred: goal tools (playbook entry points)
+
+| Goal tool | Playbook |
+|-----------|----------|
+| `gns3_prepare_lab` | Bootstrap lab / project |
+| `gns3_build_topology` | Build topology |
+| `gns3_configure_devices` | Configure devices |
+| `gns3_diagnose_connectivity` | Diagnose connectivity |
+| `gns3_run_guest_commands` | Guest SSH / host-style ops |
+| `gns3_prepare_image` | Image import + Idle-PC (densify yellow) |
+| `gns3_manage_snapshot` | Snapshot / reset |
+| `gns3_finish_lab` | Session cleanup |
+
+Shared behavior: observe-converge (reuse exact natural keys; `conflict` if same key different spec), fail-stop with step trace, statuses `success|error|partial|confirmation_required|conflict`. Expert `gns3_*` tools remain available.
+
 ## Standard lab loop
 
-Use this spine for topology work:
+Preferred spine:
 
-1. `gns3_ensure_server`
-2. `gns3_list_projects` → `gns3_open_project` or `gns3_create_project`
-3. `gns3_list_templates` / `gns3_list_nodes` / `gns3_get_topology` as needed
-4. Mutate via MCP (`gns3_add_node`, `gns3_add_link`, start/stop, configure, …)
-5. `gns3_validate_topology` when the shape should be checked
-6. Optional: `gns3_create_snapshot` / `gns3_save_project`
-7. **On completion:** ask close project? ask stop server? → MCP only after yes
-   (`gns3_cleanup_session` with explicit flags, or discrete close/stop tools)
+1. `gns3_prepare_lab` (ensure + resolve/create + open)
+2. `gns3_build_topology` (nodes/links; optional start/validate)
+3. `gns3_configure_devices` / `gns3_run_guest_commands` as needed
+4. `gns3_diagnose_connectivity` when verifying path
+5. `gns3_manage_snapshot` for checkpoints
+6. **On completion:** ask user → `gns3_finish_lab` with flags + token after preview
 
-Completion criterion for a lab change: every intended node/link/config step was done with MCP tools (or an explicit allowed escape), IDs used were resolved—not guessed, and session-close questions were asked (even if the user declines both).
+Expert multi-step loop (when goals insufficient): ensure → list/open → resolve → mutate → validate → ask cleanup.
 
 ## Configure preference
 
-- Prefer `gns3_apply_config_template` when a built-in template fits (ospf, vlan, dhcp, ssh, …).
-- If the user pastes CLI, send it with `gns3_send_console_commands` (do not rewrite into a different design unless asked).
-- For ≥3 similar devices, prefer `gns3_bulk_configure_nodes`.
+- Prefer `gns3_configure_devices` (goal) for multi-node playbook work.
+- Expert: `gns3_apply_config_template` when a built-in fits; pasted CLI via `gns3_send_console_commands` (pure-body responses); bulk via `gns3_bulk_configure_nodes`.
 
 ## Tool name mapping
 
