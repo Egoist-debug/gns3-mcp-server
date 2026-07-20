@@ -19,6 +19,7 @@ Secrets: set via environment or host MCP config. Examples use **placeholders onl
 | `GNS3_VERIFY_SSL` | TLS verify (`true`/`false`) |
 | `GNS3_SERVER_START_CMD` | Custom localhost start command (optional) |
 | `GNS3_SERVER_START_TIMEOUT` | Wait for auto-start (default `30`) |
+| `GNS3_SERVER_STOP_TIMEOUT` | Wait after SIGTERM before SIGKILL (default `10`) |
 | `GNS3_SERVER_HEALTHY_CACHE_SECONDS` | Skip re-probe window (default `30`) |
 | `GNS3_CONSOLE_USER` / `GNS3_CONSOLE_PASSWORD` | Default device console login |
 | `GNS3_CONSOLE_READY_TIMEOUT` | Console login readiness budget seconds (default `30`) |
@@ -26,9 +27,11 @@ Secrets: set via environment or host MCP config. Examples use **placeholders onl
 | `GNS3_SSH_USER` / `GNS3_SSH_PASSWORD` | Default guest SSH |
 | `GNS3_SSH_HOST_KEY_POLICY` | `accept_new` (default) / `strict` / `warn` |
 | `GNS3_SSH_CONNECT_TIMEOUT` | SSH connect readiness budget with retries (default `30`) |
+| `GNS3_CONFIRM_TOKEN_TTL_SECONDS` | One-time destructive goal token TTL (default `600`, min effective `30`) |
 | `GNS3_MCP_LAUNCH_LOG` | Optional launcher log path (OMP script) |
 
 API `username`/`password` tool fields are **not** guest console/SSH credentials.
+Confirmation tokens are process-local to the MCP server process (not shared across restarts).
 
 ## Install skill (this monorepo layout)
 
@@ -81,7 +84,7 @@ readlink -f .agents/skills/gns3-mcp
 
 3. Symlink skill into `.omp/skills/gns3-mcp` (above)
 4. Restart OMP / reload MCP
-5. Tools appear as `mcp__gns_*` / `xd://mcp__gns_*`
+5. Tools appear as `mcp__gns_*` / `xd://mcp__gns_*` (58 tools expected)
 
 Launcher: `run-omp.sh` → `omp_stdio_entry.py` with `PYTHONPATH=src`.
 
@@ -168,22 +171,25 @@ Must be **stdio** MCP, not a random HTTP sidecar the agent curls.
 
 Run in order after wiring:
 
-1. Host shows GNS3 MCP tools (names contain `gns3` / `gns_`)
-2. Call **`gns3_ensure_server`** (or host-prefixed equivalent) → success / healthy
+1. Host shows GNS3 MCP tools (names contain `gns3` / `gns_`) — expect **58** including 8 goals
+2. Call **`gns3_prepare_lab`** with a test project name **or** expert **`gns3_ensure_server`** → success / healthy
 3. Call **`gns3_list_projects`** → JSON list (may be empty)
-4. Optional: `gns3_list_templates`
-5. Confirm skill is loadable (`gns3-mcp`) and root `AGENTS.md` points at MCP-first policy
-6. Negative check: agent must **not** need `curl http://127.0.0.1:3080/v2/projects` for the same job
+4. Optional: `gns3_list_templates`, `gns3_build_topology` dry run on an empty project
+5. Optional auth smoke: `gns3_finish_lab` with all flags false → success “nothing requested”; with one flag true and no token → `confirmation_required`
+6. Confirm skill is loadable (`gns3-mcp`) and root `AGENTS.md` points at MCP-first + goal-preferred policy
+7. Negative check: agent must **not** need `curl http://127.0.0.1:3080/v2/projects` for the same job
 
 ## Failure triage
 
 | Symptom | Check |
 |---------|--------|
 | No tools listed | MCP config path, command executable, restart client |
+| Tool count ≪ 58 / missing goals | Stale install / wrong entrypoint / old checkout |
 | `run-omp.sh` exit 127 | `uv sync` / missing `.venv/bin/python` |
 | Connection errors | `GNS3_SERVER_URL`, GNS3 running, auth env, `GNS3_VERIFY_SSL` |
 | Tools work but agent uses Python | Skill not loaded; reinforce `AGENTS.md`; reject scripts and re-run via MCP |
 | Console/SSH auth fails | Guest creds vs API creds; set `GNS3_CONSOLE_*` / `GNS3_SSH_*` or per-call login fields |
+| `confirmation_token` rejected | Token expired/used; project/snapshot/flags changed; MCP process restarted |
 
 ## Related files
 
