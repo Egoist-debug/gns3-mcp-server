@@ -12,6 +12,7 @@ from gns3_mcp.telnet_client import (
     clean_console_text,
     looks_like_shell_prompt,
     prompt_complete,
+    shape_command_response,
     split_at_first_prompt,
 )
 
@@ -49,9 +50,63 @@ class CleanAndPromptTests(unittest.TestCase):
         self.assertTrue(looks_like_shell_prompt("R1#"))
         self.assertTrue(looks_like_shell_prompt("R1(config-if)#"))
         self.assertTrue(looks_like_shell_prompt("user@host$"))
+        self.assertTrue(looks_like_shell_prompt("admin@sonic:~$"))
         self.assertFalse(looks_like_shell_prompt("Password:"))
         self.assertFalse(looks_like_shell_prompt("--More--"))
         self.assertFalse(looks_like_shell_prompt("! comment #"))
+
+    def test_looks_like_shell_prompt_with_ansi(self):
+        # SONiC/bash often color the hostname and $/#.
+        colored = "\x1b[01;32madmin@sonic\x1b[00m:\x1b[01;34m~\x1b[00m$ "
+        self.assertTrue(looks_like_shell_prompt(colored))
+        self.assertTrue(
+            looks_like_shell_prompt("\x1b[1;32mR1#\x1b[0m")
+        )
+
+    def test_split_at_first_prompt_ansi_sonic(self):
+        prompt = "\x1b[01;32madmin@sonic\x1b[00m:\x1b[01;34m~\x1b[00m$"
+        buf = (
+            "sudo config vlan add 10\n"
+            f"{prompt}\n"
+            "sudo config interface ip remove Ethernet8 10.0.0.4/31\n"
+            f"{prompt}"
+        )
+        split = split_at_first_prompt(buf, wait_for=["#", "$", ">"])
+        self.assertIsNotNone(split)
+        complete, remainder = split
+        self.assertIn("sudo config vlan add 10", complete)
+        self.assertNotIn("ip remove", complete)
+        self.assertIn("ip remove", remainder)
+
+    def test_shape_removes_echo_and_retains_completion_prompt(self):
+        raw = (
+            "sudo config vlan add 10\n"
+            "admin@sonic:~$ "
+        )
+        shaped = shape_command_response(raw, cmd="sudo config vlan add 10")
+        self.assertEqual(shaped, "admin@sonic:~$ ")
+
+        raw2 = (
+            "sudo config interface ip remove Ethernet8 10.0.0.4/31\n"
+            "Error: IP not found\n"
+            "admin@sonic:~$\n"
+        )
+        shaped2 = shape_command_response(
+            raw2, cmd="sudo config interface ip remove Ethernet8 10.0.0.4/31"
+        )
+        self.assertEqual(shaped2, "Error: IP not found\nadmin@sonic:~$")
+
+    def test_shape_removes_prompt_prefixed_echo_only(self):
+        raw = "R1#show version\nCisco IOS\nR1#"
+        self.assertEqual(
+            shape_command_response(raw, cmd="show version"), "Cisco IOS\nR1#"
+        )
+
+        body_with_command = "Cisco IOS show version details\nR1#"
+        self.assertEqual(
+            shape_command_response(body_with_command, cmd="show version"),
+            body_with_command,
+        )
 
     def test_split_at_first_prompt_keeps_remainder(self):
         buf = "show ver\nCisco IOS\nR1#\nshow ip\nEth0 up\nR1#"
@@ -157,6 +212,37 @@ class TelnetOutputTests(unittest.TestCase):
         self.assertTrue(meta["truncated"])
         self.assertLessEqual(len(text.encode("utf-8")), 40)
 
+    def test_send_cmd_strips_echo_and_retains_completion_prompt(self):
+        c = self._client(
+            [
+                "sudo config vlan add 10\nadmin@sonic:~$",
+            ]
+        )
+        text, _ = c.send_cmd(
+            "sudo config vlan add 10", wait_for=["$", "#"], return_meta=True
+        )
+        self.assertEqual(text, "admin@sonic:~$")
+
+    def test_send_cmd_sonic_ansi_prompt_pairs(self):
+        p = "\x1b[01;32madmin@sonic\x1b[00m:\x1b[01;34m~\x1b[00m$"
+        c = self._client(
+            [
+                f"sudo config vlan add 10\n{p}\n"
+                f"sudo config interface ip remove Ethernet8 10.0.0.4/31\n{p}",
+            ]
+        )
+        r1, _ = c.send_cmd(
+            "sudo config vlan add 10", wait_for=["$", "#", ">"], return_meta=True
+        )
+        r2, _ = c.send_cmd(
+            "sudo config interface ip remove Ethernet8 10.0.0.4/31",
+            wait_for=["$", "#", ">"],
+            return_meta=True,
+        )
+        self.assertNotIn("ip remove", r1)
+        self.assertTrue(r1.endswith("admin@sonic:~$"))
+        self.assertNotIn("vlan add", r2)
+        self.assertTrue(r2.endswith("admin@sonic:~$"))
 
 
 class TelnetMultiCommandPairingTests(unittest.TestCase):
@@ -194,9 +280,10 @@ class TelnetMultiCommandPairingTests(unittest.TestCase):
         r1, _ = c.send_cmd("show ver", wait_for=["#", ">"], return_meta=True)
         r2, _ = c.send_cmd("show ip", wait_for=["#", ">"], return_meta=True)
         self.assertIn("Cisco IOS", r1)
-        self.assertTrue(r1.rstrip().endswith("R1#") or "R1#" in r1.splitlines()[-1])
+        self.assertTrue(r1.endswith("R1#"))
         self.assertNotIn("Eth0", r1)
         self.assertIn("Eth0", r2)
+        self.assertTrue(r2.endswith("R1#"))
         self.assertNotIn("Cisco IOS", r2)
 
     def test_three_command_sequence_stays_ordered(self):

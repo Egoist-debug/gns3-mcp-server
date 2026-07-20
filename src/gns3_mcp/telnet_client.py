@@ -82,6 +82,13 @@ def default_max_response_bytes() -> int:
     return max(1024, _env_int("GNS3_CONSOLE_MAX_RESPONSE_BYTES", DEFAULT_MAX_RESPONSE_BYTES))
 
 
+def strip_ansi(text: str) -> str:
+    """Remove ANSI/VT escape sequences (CSI/OSC/DCS/Fe)."""
+    if not text:
+        return ""
+    return _ANSI_RE.sub("", text)
+
+
 def clean_console_text(text: str) -> str:
     """Normalize console text for agent consumption.
 
@@ -123,7 +130,7 @@ def clean_console_text(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     # Remove full ANSI/VT sequences while ESC is still present.
     # Dropping only ESC (later C0 filter) leaves residues like "[01;36m".
-    text = _ANSI_RE.sub("", text)
+    text = strip_ansi(text)
     # Strip pager chrome lines/fragments.
     text = _PAGER_RE.sub("", text)
     cleaned_chars: List[str] = []
@@ -136,6 +143,51 @@ def clean_console_text(text: str) -> str:
     # Collapse runs of spaces before newlines lightly.
     text = re.sub(r"[ \t]+\n", "\n", text)
     return text
+
+
+def shape_command_response(text: str, cmd: Optional[str] = None) -> str:
+    """Trim a leading command echo while retaining completion framing.
+
+    Devices echo the typed command before emitting output and a completion
+    prompt. Agents already have ``command`` in the result entry, but the prompt
+    defines the response boundary and remains part of the public response.
+    """
+    if not text:
+        return ""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    # Drop leading empty / prompt-only / command-echo lines.
+    cmd_norm = (cmd or "").strip()
+    i = 0
+    while i < len(lines):
+        s = lines[i].strip()
+        if not s:
+            i += 1
+            continue
+        if looks_like_shell_prompt(s):
+            i += 1
+            continue
+        if cmd_norm and s == cmd_norm:
+            i += 1
+            break
+        # Some consoles emit the local echo immediately after the prompt
+        # (for example, ``R1#show version``) rather than on its own line.
+        # Require an actual recognized prompt prefix so body lines that merely
+        # contain the command remain intact.
+        if cmd_norm and s.endswith(cmd_norm):
+            prompt = s[: -len(cmd_norm)]
+            if prompt and looks_like_shell_prompt(prompt):
+                i += 1
+                break
+        # Local-echo can re-print the command with trailing spaces.
+        if cmd_norm and s.rstrip() == cmd_norm:
+            i += 1
+            break
+        break
+    body = lines[i:]
+    # Trim trailing empties, but preserve the first completion prompt.
+    while body and not body[-1].strip():
+        body.pop()
+    return "\n".join(body)
 
 
 def _last_nonempty_line(text: str) -> str:
@@ -161,8 +213,11 @@ def looks_like_shell_prompt(line: str, extra_markers: Optional[List[str]] = None
 
     Real prompts are short tokens without spaces (``R1#``, ``R1(config-if)#``,
     ``user@host$``). Free text that merely ends with ``#``/``>`` is not a prompt.
+
+    ANSI color on the prompt (common on SONiC/Linux) is stripped before matching
+    so framing still completes on the first prompt line.
     """
-    line = (line or "").strip()
+    line = strip_ansi(line or "").strip()
     if not line or len(line) > 80:
         return False
     if is_pager_line(line):
@@ -207,7 +262,8 @@ def split_at_first_prompt(
 
     Returns ``(through_prompt, remainder)`` or ``None`` if no prompt yet.
     Completion is first-prompt (not last-line) so multi-command bleed cannot
-    be returned as a single response.
+    be returned as a single response. Prompt detection strips ANSI so colored
+    SONiC/Linux prompts still frame correctly.
     """
     if not buf:
         return None
@@ -217,7 +273,8 @@ def split_at_first_prompt(
     acc: List[str] = []
     for i, line in enumerate(lines):
         acc.append(line)
-        if line.strip() and looks_like_shell_prompt(line.strip(), extra_markers=wait_for):
+        # Detect on ANSI-stripped content; keep original bytes in the split.
+        if line.strip() and looks_like_shell_prompt(line, extra_markers=wait_for):
             complete = "\n".join(acc)
             if i < len(lines) - 1:
                 complete += "\n"
@@ -515,8 +572,12 @@ class TelnetClient:
                 pass
         return buf
 
-    def _finalize_output(self, raw: str) -> Tuple[str, Dict[str, Any]]:
+    def _finalize_output(
+        self, raw: str, cmd: Optional[str] = None, *, shape: bool = True
+    ) -> Tuple[str, Dict[str, Any]]:
         cleaned = clean_console_text(raw)
+        if shape:
+            cleaned = shape_command_response(cleaned, cmd=cmd)
         return apply_response_cap(cleaned, self.max_response_bytes)
 
     def send_cmd(
@@ -526,11 +587,13 @@ class TelnetClient:
         wait_time: float = 0.5,
         timeout: Optional[float] = None,
         return_meta: bool = False,
+        shape_response: bool = True,
     ):
         """Send a command and wait for response.
 
-        Pre-send drain drops prompt-only residual so leftover prompts after
-        boot/login cannot be returned as this command's entire response.
+        By default the returned text is shaped to remove the command echo while
+        retaining its completion prompt. Internal control paths may set
+        ``shape_response=False`` when they inspect raw prompt markers.
         Returns cleaned text, or (text, meta) when return_meta=True.
         """
         if not self.sock or not self.connected:
@@ -551,7 +614,7 @@ class TelnetClient:
             else:
                 raw = self.read_available(wait_time)
 
-            text, meta = self._finalize_output(raw)
+            text, meta = self._finalize_output(raw, cmd=cmd, shape=shape_response)
             return (text, meta) if return_meta else text
         except Exception as e:
             logger.error(f"Send error: {e}")
@@ -790,17 +853,28 @@ class TelnetClient:
 
         try:
             output = self.send_cmd(
-                "enable", wait_for=[">", "#", "Password:"], wait_time=1.0
+                "enable",
+                wait_for=[">", "#", "Password:"],
+                wait_time=1.0,
+                shape_response=False,
             )
 
             if "Password:" in output:
                 if not enable_password:
                     logger.error("Enable password required but not provided")
                     return False
-                self.send_cmd(enable_password, wait_for=["#"], wait_time=1.0)
+                self.send_cmd(
+                    enable_password,
+                    wait_for=["#"],
+                    wait_time=1.0,
+                    shape_response=False,
+                )
 
             output = self.send_cmd(
-                "configure terminal", wait_for=["(config)#"], wait_time=1.0
+                "configure terminal",
+                wait_for=["(config)#"],
+                wait_time=1.0,
+                shape_response=False,
             )
 
             if "(config)" in output:
@@ -817,7 +891,7 @@ class TelnetClient:
             return False
 
         try:
-            self.send_cmd("end", wait_for=["#"], wait_time=1.0)
+            self.send_cmd("end", wait_for=["#"], wait_time=1.0, shape_response=False)
             return True
         except Exception as e:
             logger.error(f"Failed to exit config mode: {e}")
@@ -830,11 +904,16 @@ class TelnetClient:
 
         try:
             output = self.send_cmd(
-                "write memory", wait_for=["#", "[OK]", "[confirm]"], wait_time=2.0
+                "write memory",
+                wait_for=["#", "[OK]", "[confirm]"],
+                wait_time=2.0,
+                shape_response=False,
             )
 
             if "[confirm]" in output and confirm:
-                output += self.send_cmd("", wait_for=["#", "[OK]"], wait_time=2.0)
+                output += self.send_cmd(
+                    "", wait_for=["#", "[OK]"], wait_time=2.0, shape_response=False
+                )
 
             return output
         except Exception as e:
