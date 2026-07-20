@@ -1079,6 +1079,8 @@ async def _send_console_commands_impl(
                     entry["truncated"] = True
                     entry["response_bytes"] = meta.get("response_bytes")
                     entry["response_bytes_raw"] = meta.get("response_bytes_raw")
+                if meta and "completed" in meta:
+                    entry["completed"] = bool(meta["completed"])
                 return entry
 
             if enter_config_mode:

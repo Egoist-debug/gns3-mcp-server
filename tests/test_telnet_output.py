@@ -78,13 +78,13 @@ class CleanAndPromptTests(unittest.TestCase):
         self.assertNotIn("ip remove", complete)
         self.assertIn("ip remove", remainder)
 
-    def test_shape_removes_echo_and_retains_completion_prompt(self):
+    def test_shape_removes_echo_and_trailing_completion_prompt(self):
         raw = (
             "sudo config vlan add 10\n"
             "admin@sonic:~$ "
         )
         shaped = shape_command_response(raw, cmd="sudo config vlan add 10")
-        self.assertEqual(shaped, "admin@sonic:~$ ")
+        self.assertEqual(shaped, "")
 
         raw2 = (
             "sudo config interface ip remove Ethernet8 10.0.0.4/31\n"
@@ -94,18 +94,18 @@ class CleanAndPromptTests(unittest.TestCase):
         shaped2 = shape_command_response(
             raw2, cmd="sudo config interface ip remove Ethernet8 10.0.0.4/31"
         )
-        self.assertEqual(shaped2, "Error: IP not found\nadmin@sonic:~$")
+        self.assertEqual(shaped2, "Error: IP not found")
 
     def test_shape_removes_prompt_prefixed_echo_only(self):
         raw = "R1#show version\nCisco IOS\nR1#"
         self.assertEqual(
-            shape_command_response(raw, cmd="show version"), "Cisco IOS\nR1#"
+            shape_command_response(raw, cmd="show version"), "Cisco IOS"
         )
 
         body_with_command = "Cisco IOS show version details\nR1#"
         self.assertEqual(
             shape_command_response(body_with_command, cmd="show version"),
-            body_with_command,
+            "Cisco IOS show version details",
         )
 
     def test_split_at_first_prompt_keeps_remainder(self):
@@ -212,16 +212,34 @@ class TelnetOutputTests(unittest.TestCase):
         self.assertTrue(meta["truncated"])
         self.assertLessEqual(len(text.encode("utf-8")), 40)
 
-    def test_send_cmd_strips_echo_and_retains_completion_prompt(self):
+    def test_send_cmd_strips_echo_and_trailing_completion_prompt(self):
         c = self._client(
             [
                 "sudo config vlan add 10\nadmin@sonic:~$",
             ]
         )
-        text, _ = c.send_cmd(
+        text, meta = c.send_cmd(
             "sudo config vlan add 10", wait_for=["$", "#"], return_meta=True
         )
-        self.assertEqual(text, "admin@sonic:~$")
+        self.assertEqual(text, "")
+        self.assertTrue(meta["completed"])
+
+    def test_send_cmd_idle_read_not_completed(self):
+        # wait_for=None uses read_available — body ending in a prompt-looking
+        # line must not be reported as completed.
+        c = self._client(
+            [
+                "hash comment: config # note\nR1#\n",
+                socket.timeout("idle"),
+            ]
+        )
+        with patch("gns3_mcp.telnet_client.time.sleep", return_value=None):
+            text, meta = c.send_cmd(
+                "show", wait_for=None, wait_time=0.01, return_meta=True
+            )
+        self.assertIn("hash comment", text)
+        self.assertNotIn("R1#", text)
+        self.assertFalse(meta["completed"])
 
     def test_send_cmd_sonic_ansi_prompt_pairs(self):
         p = "\x1b[01;32madmin@sonic\x1b[00m:\x1b[01;34m~\x1b[00m$"
@@ -231,18 +249,22 @@ class TelnetOutputTests(unittest.TestCase):
                 f"sudo config interface ip remove Ethernet8 10.0.0.4/31\n{p}",
             ]
         )
-        r1, _ = c.send_cmd(
+        r1, m1 = c.send_cmd(
             "sudo config vlan add 10", wait_for=["$", "#", ">"], return_meta=True
         )
-        r2, _ = c.send_cmd(
+        r2, m2 = c.send_cmd(
             "sudo config interface ip remove Ethernet8 10.0.0.4/31",
             wait_for=["$", "#", ">"],
             return_meta=True,
         )
         self.assertNotIn("ip remove", r1)
-        self.assertTrue(r1.endswith("admin@sonic:~$"))
+        self.assertEqual(r1, "")
+        self.assertTrue(m1["completed"])
+        self.assertNotIn("admin@", r1)
         self.assertNotIn("vlan add", r2)
-        self.assertTrue(r2.endswith("admin@sonic:~$"))
+        self.assertEqual(r2, "")
+        self.assertTrue(m2["completed"])
+        self.assertNotIn("admin@", r2)
 
 
 class TelnetMultiCommandPairingTests(unittest.TestCase):
@@ -277,13 +299,14 @@ class TelnetMultiCommandPairingTests(unittest.TestCase):
                 "show ver\nCisco IOS\nR1#\nshow ip\nEth0 up\nR1#",
             ]
         )
-        r1, _ = c.send_cmd("show ver", wait_for=["#", ">"], return_meta=True)
-        r2, _ = c.send_cmd("show ip", wait_for=["#", ">"], return_meta=True)
+        r1, m1 = c.send_cmd("show ver", wait_for=["#", ">"], return_meta=True)
+        r2, m2 = c.send_cmd("show ip", wait_for=["#", ">"], return_meta=True)
         self.assertIn("Cisco IOS", r1)
-        self.assertTrue(r1.endswith("R1#"))
+        self.assertEqual(r1, "Cisco IOS")
+        self.assertTrue(m1["completed"])
         self.assertNotIn("Eth0", r1)
-        self.assertIn("Eth0", r2)
-        self.assertTrue(r2.endswith("R1#"))
+        self.assertEqual(r2, "Eth0 up")
+        self.assertTrue(m2["completed"])
         self.assertNotIn("Cisco IOS", r2)
 
     def test_three_command_sequence_stays_ordered(self):

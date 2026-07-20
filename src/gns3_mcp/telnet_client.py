@@ -146,11 +146,12 @@ def clean_console_text(text: str) -> str:
 
 
 def shape_command_response(text: str, cmd: Optional[str] = None) -> str:
-    """Trim a leading command echo while retaining completion framing.
+    """Trim leading command echo and trailing completion prompt.
 
     Devices echo the typed command before emitting output and a completion
-    prompt. Agents already have ``command`` in the result entry, but the prompt
-    defines the response boundary and remains part of the public response.
+    prompt. Agents already have ``command`` in the result entry. Public
+    ``response`` is command body only; completion is reported via meta
+    ``completed``, not by echoing the prompt string or username.
     """
     if not text:
         return ""
@@ -184,9 +185,13 @@ def shape_command_response(text: str, cmd: Optional[str] = None) -> str:
             break
         break
     body = lines[i:]
-    # Trim trailing empties, but preserve the first completion prompt.
+    # Trim trailing empties, then strip the completion prompt line.
     while body and not body[-1].strip():
         body.pop()
+    if body and looks_like_shell_prompt(body[-1]):
+        body.pop()
+        while body and not body[-1].strip():
+            body.pop()
     return "\n".join(body)
 
 
@@ -573,12 +578,27 @@ class TelnetClient:
         return buf
 
     def _finalize_output(
-        self, raw: str, cmd: Optional[str] = None, *, shape: bool = True
+        self,
+        raw: str,
+        cmd: Optional[str] = None,
+        *,
+        shape: bool = True,
+        framed: bool = False,
     ) -> Tuple[str, Dict[str, Any]]:
         cleaned = clean_console_text(raw)
+        # Only first-prompt framing (read_until) can prove completion. Idle
+        # reads (wait_for=None / read_available) must not treat body lines that
+        # merely look like prompts as completed.
+        completed = bool(
+            framed
+            and cleaned
+            and looks_like_shell_prompt(_last_nonempty_line(cleaned))
+        )
         if shape:
             cleaned = shape_command_response(cleaned, cmd=cmd)
-        return apply_response_cap(cleaned, self.max_response_bytes)
+        text, meta = apply_response_cap(cleaned, self.max_response_bytes)
+        meta["completed"] = completed
+        return text, meta
 
     def send_cmd(
         self,
@@ -591,14 +611,20 @@ class TelnetClient:
     ):
         """Send a command and wait for response.
 
-        By default the returned text is shaped to remove the command echo while
-        retaining its completion prompt. Internal control paths may set
+        By default the returned text is shaped to remove the command echo and
+        trailing completion prompt. Completion is exposed as meta
+        ``completed`` when ``return_meta=True``. Internal control paths may set
         ``shape_response=False`` when they inspect raw prompt markers.
         Returns cleaned text, or (text, meta) when return_meta=True.
         """
         if not self.sock or not self.connected:
             logger.error("Not connected")
-            empty_meta = {"truncated": False, "response_bytes": 0, "response_bytes_raw": 0}
+            empty_meta = {
+                "truncated": False,
+                "response_bytes": 0,
+                "response_bytes_raw": 0,
+                "completed": False,
+            }
             return ("", empty_meta) if return_meta else ""
 
         try:
@@ -611,14 +637,23 @@ class TelnetClient:
 
             if wait_for is not None:
                 raw = self.read_until(wait_for, timeout=timeout or self.timeout)
+                framed = True
             else:
                 raw = self.read_available(wait_time)
+                framed = False
 
-            text, meta = self._finalize_output(raw, cmd=cmd, shape=shape_response)
+            text, meta = self._finalize_output(
+                raw, cmd=cmd, shape=shape_response, framed=framed
+            )
             return (text, meta) if return_meta else text
         except Exception as e:
             logger.error(f"Send error: {e}")
-            empty_meta = {"truncated": False, "response_bytes": 0, "response_bytes_raw": 0}
+            empty_meta = {
+                "truncated": False,
+                "response_bytes": 0,
+                "response_bytes_raw": 0,
+                "completed": False,
+            }
             return ("", empty_meta) if return_meta else ""
 
     def wait_for_boot(
