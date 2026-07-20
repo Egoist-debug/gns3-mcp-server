@@ -9,6 +9,7 @@ from gns3_mcp.server_lifecycle import ensure_gns3_server, normalize_server_url
 from gns3_mcp.workflow.console_ops import send_console_commands
 from gns3_mcp.workflow.envelopes import (
     STATUS_SUCCESS,
+    STEP_CHANGED,
     STEP_FAILED,
     STEP_SKIPPED,
     STEP_SUCCESS,
@@ -18,6 +19,7 @@ from gns3_mcp.workflow.envelopes import (
 )
 from gns3_mcp.workflow.resolve import ResolveAmbiguous, ResolveMissing, resolve_node, resolve_project
 from gns3_mcp.workflow.runner import Step, run_steps
+from gns3_mcp.workflow.topology import validate_topology_snapshot
 
 
 async def diagnose_connectivity_goal(
@@ -79,57 +81,40 @@ async def diagnose_connectivity_goal(
         pid = ctx["project"]["project_id"]
         nodes = await client.get_project_nodes(pid)
         links = await client.get_project_links(pid)
-        connected = set()
-        for link in links:
-            ends = link.get("nodes") or []
-            if len(ends) >= 2:
-                connected.add(ends[0].get("node_id"))
-                connected.add(ends[1].get("node_id"))
-        warnings = []
-        for n in nodes:
-            if n.get("node_id") not in connected:
-                msg = f"Node '{n.get('name')}' has no connections"
-                warnings.append(msg)
-                ctx["findings"].append(
-                    {
-                        "severity": "warning",
-                        "code": "disconnected_node",
-                        "message": msg,
-                        "source_step": "validate_topology",
-                        "node": n.get("name"),
-                    }
-                )
-            if n.get("node_type") in ("dynamips", "iou", "qemu") and n.get("status") != "started":
-                msg = f"Critical node '{n.get('name')}' is not running"
-                warnings.append(msg)
-                ctx["findings"].append(
-                    {
-                        "severity": "warning",
-                        "code": "node_not_started",
-                        "message": msg,
-                        "source_step": "validate_topology",
-                        "node": n.get("name"),
-                    }
-                )
-        ctx["validation"] = {
-            "total_nodes": len(nodes),
-            "total_links": len(links),
-            "warnings": warnings,
-            "is_valid": True,
-        }
+        ctx["validation"] = validate_topology_snapshot(nodes, links)
+        for issue in ctx["validation"]["issues"]:
+            ctx["findings"].append(
+                {
+                    "severity": "error",
+                    "code": "topology_issue",
+                    "message": issue,
+                    "source_step": "validate_topology",
+                }
+            )
+        for warning in ctx["validation"]["warnings"]:
+            ctx["findings"].append(
+                {
+                    "severity": "warning",
+                    "code": "topology_warning",
+                    "message": warning,
+                    "source_step": "validate_topology",
+                }
+            )
         ctx["topology"] = {
             "nodes": [
                 {
-                    "name": n.get("name"),
-                    "node_id": n.get("node_id"),
-                    "status": n.get("status"),
-                    "node_type": n.get("node_type"),
+                    "name": node.get("name"),
+                    "node_id": node.get("node_id"),
+                    "status": node.get("status"),
+                    "node_type": node.get("node_type"),
                 }
-                for n in nodes
+                for node in nodes
             ],
             "link_count": len(links),
         }
-        return step_entry("validate_topology", STEP_SUCCESS, detail=ctx["validation"])
+        return step_entry(
+            "validate_topology", STEP_SUCCESS, detail=ctx["validation"]
+        )
 
     async def probe_step() -> Dict[str, Any]:
         if not suspect_nodes:
@@ -139,35 +124,43 @@ async def diagnose_connectivity_goal(
                 detail={"reason": "no suspect_nodes"},
             )
         client: GNS3APIClient = ctx["client"]
-        pid = ctx["project"]["project_id"]
+        project_id = ctx["project"]["project_id"]
+        mutated = False
+
+        def probe_failure(
+            error: str, detail: Optional[Dict[str, Any]] = None
+        ) -> Dict[str, Any]:
+            return step_entry(
+                "console_probes",
+                STEP_FAILED,
+                error=error,
+                detail=detail,
+                mutated=mutated,
+            )
+
         for spec in suspect_nodes:
             try:
                 node = await resolve_node(
                     client,
-                    pid,
+                    project_id,
                     node_id=spec.get("node_id"),
                     node_name=spec.get("node_name") or spec.get("name"),
                 )
             except (ResolveMissing, ResolveAmbiguous, ValueError) as exc:
-                return step_entry(
-                    "console_probes",
-                    STEP_FAILED,
-                    error=str(exc),
-                )
-            cmds = list(spec.get("commands") or probe_commands)
+                return probe_failure(str(exc))
+            commands = list(spec.get("commands") or probe_commands)
             if node.get("status") != "started":
                 try:
-                    await client.start_node(pid, node["node_id"])
+                    await client.start_node(project_id, node["node_id"])
                 except Exception as exc:
-                    return step_entry(
-                        "console_probes",
-                        STEP_FAILED,
-                        error=f"cannot start {node.get('name')}: {exc}",
+                    return probe_failure(
+                        f"cannot start {node.get('name')}: {exc}"
                     )
-            out = await send_console_commands(
-                project_id=pid,
+                mutated = True
+            output = await send_console_commands(
+                project_id=project_id,
                 node_id=node["node_id"],
-                commands=cmds,
+                commands=commands,
                 server_url=url,
                 username=username,
                 password=password,
@@ -176,25 +169,22 @@ async def diagnose_connectivity_goal(
                 login_username=spec.get("login_username"),
                 login_password=spec.get("login_password"),
             )
-            if out.get("status") != "success":
-                return step_entry(
-                    "console_probes",
-                    STEP_FAILED,
-                    error=out.get("error") or "probe failed",
-                    detail={"node": node.get("name")},
+            if output.get("status") != "success":
+                return probe_failure(
+                    output.get("error") or "probe failed",
+                    {"node": node.get("name")},
                 )
             ctx["probes"].append(
                 {
                     "node_name": node.get("name"),
                     "node_id": node.get("node_id"),
-                    "results": out.get("results"),
+                    "results": output.get("results"),
                 }
             )
-            for item in out.get("results") or []:
+            for item in output.get("results") or []:
                 body = (item.get("response") or "").strip()
                 if not body:
                     continue
-                # evidence-only finding — no ML root cause
                 ctx["findings"].append(
                     {
                         "severity": "info",
@@ -208,8 +198,8 @@ async def diagnose_connectivity_goal(
                 )
         return step_entry(
             "console_probes",
-            STEP_SUCCESS,
-            detail={"probed": [p["node_name"] for p in ctx["probes"]]},
+            STEP_CHANGED if mutated else STEP_SUCCESS,
+            detail={"probed": [probe["node_name"] for probe in ctx["probes"]]},
         )
 
     result = await run_steps(

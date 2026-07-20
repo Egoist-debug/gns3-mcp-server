@@ -47,6 +47,22 @@ def _template_commands(template_name: str, params: Dict[str, Any]) -> List[str]:
         raise ValueError(f"unsupported template_name: {template_name}")
     return list(fn(params or {}))
 
+def _incomplete_commands(
+    commands: List[str], result: Dict[str, Any]
+) -> List[str]:
+    entries = result.get("results")
+    if not isinstance(entries, list):
+        return list(commands)
+    incomplete: List[str] = []
+    for index, command in enumerate(commands):
+        if (
+            index >= len(entries)
+            or not isinstance(entries[index], dict)
+            or entries[index].get("completed") is not True
+        ):
+            incomplete.append(command)
+    return incomplete
+
 
 async def configure_devices_goal(
     *,
@@ -103,6 +119,19 @@ async def configure_devices_goal(
     async def configure_step() -> Dict[str, Any]:
         client: GNS3APIClient = ctx["client"]
         pid = ctx["project"]["project_id"]
+        mutated = False
+
+        def configure_failure(
+            error: str, detail: Optional[Dict[str, Any]] = None
+        ) -> Dict[str, Any]:
+            return step_entry(
+                "configure_targets",
+                STEP_FAILED,
+                error=error,
+                detail=detail,
+                mutated=mutated,
+            )
+
         for idx, target in enumerate(targets):
             node_name = target.get("node_name")
             node_id = target.get("node_id")
@@ -111,53 +140,45 @@ async def configure_devices_goal(
                     client, pid, node_id=node_id, node_name=node_name
                 )
             except ResolveMissing as exc:
-                return step_entry(
-                    "configure_targets",
-                    STEP_FAILED,
-                    error=f"{exc}; call gns3_list_nodes for names",
-                    detail={"target_index": idx, "target": {"node_name": node_name, "node_id": node_id}},
+                return configure_failure(
+                    f"{exc}; call gns3_list_nodes for names",
+                    {
+                        "target_index": idx,
+                        "target": {"node_name": node_name, "node_id": node_id},
+                    },
                 )
             except (ResolveAmbiguous, ValueError) as exc:
-                return step_entry(
-                    "configure_targets",
-                    STEP_FAILED,
-                    error=str(exc),
-                    detail={"target_index": idx},
-                )
+                return configure_failure(str(exc), {"target_index": idx})
 
-            nid = node.get("node_id")
+            node_id = node.get("node_id")
             if node.get("status") != "started":
                 try:
-                    await client.start_node(pid, nid)
+                    await client.start_node(pid, node_id)
                 except Exception as exc:
-                    return step_entry(
-                        "configure_targets",
-                        STEP_FAILED,
-                        error=f"failed to start node {node.get('name')}: {exc}",
+                    return configure_failure(
+                        f"failed to start node {node.get('name')}: {exc}"
                     )
+                mutated = True
 
             commands = list(target.get("commands") or [])
             template_name = target.get("template_name")
             if template_name:
                 try:
-                    commands = _template_commands(template_name, target.get("params") or {})
+                    commands = _template_commands(
+                        template_name, target.get("params") or {}
+                    )
                 except Exception as exc:
-                    return step_entry(
-                        "configure_targets",
-                        STEP_FAILED,
-                        error=str(exc),
-                        detail={"node": node.get("name")},
+                    return configure_failure(
+                        str(exc), {"node": node.get("name")}
                     )
             if not commands:
-                return step_entry(
-                    "configure_targets",
-                    STEP_FAILED,
-                    error=f"no commands for node {node.get('name')}",
+                return configure_failure(
+                    f"no commands for node {node.get('name')}"
                 )
 
             console_result = await send_console_commands(
                 project_id=pid,
-                node_id=nid,
+                node_id=node_id,
                 commands=commands,
                 server_url=url,
                 username=username,
@@ -169,20 +190,30 @@ async def configure_devices_goal(
                 login_password=target.get("login_password"),
             )
             if console_result.get("status") != "success":
-                return step_entry(
-                    "configure_targets",
-                    STEP_FAILED,
-                    error=console_result.get("error") or "console failed",
-                    detail={"node": node.get("name"), "console": console_result},
+                mutated = mutated or bool(console_result.get("results"))
+                return configure_failure(
+                    console_result.get("error") or "console failed",
+                    {"node": node.get("name"), "console": console_result},
                 )
 
-            verify_cmds = list(target.get("verify_commands") or [])
+            mutated = True
+            incomplete = _incomplete_commands(commands, console_result)
+            if incomplete:
+                return configure_failure(
+                    f"console did not complete commands on {node.get('name')}",
+                    {
+                        "node": node.get("name"),
+                        "incomplete_commands": incomplete,
+                    },
+                )
+
+            verify_commands = list(target.get("verify_commands") or [])
             verify_result = None
-            if verify_cmds:
+            if verify_commands:
                 verify_result = await send_console_commands(
                     project_id=pid,
-                    node_id=nid,
-                    commands=verify_cmds,
+                    node_id=node_id,
+                    commands=verify_commands,
                     server_url=url,
                     username=username,
                     password=password,
@@ -192,26 +223,37 @@ async def configure_devices_goal(
                     login_password=target.get("login_password"),
                 )
                 if verify_result.get("status") != "success":
-                    return step_entry(
-                        "configure_targets",
-                        STEP_FAILED,
-                        error=verify_result.get("error") or "verify failed",
-                        detail={"node": node.get("name"), "verify": verify_result},
+                    return configure_failure(
+                        verify_result.get("error") or "verify failed",
+                        {"node": node.get("name"), "verify": verify_result},
+                    )
+                incomplete_verify = _incomplete_commands(
+                    verify_commands, verify_result
+                )
+                if incomplete_verify:
+                    return configure_failure(
+                        f"verification did not complete on {node.get('name')}",
+                        {
+                            "node": node.get("name"),
+                            "incomplete_commands": incomplete_verify,
+                        },
                     )
 
             ctx["results"].append(
                 {
                     "node_name": node.get("name"),
-                    "node_id": nid,
+                    "node_id": node_id,
                     "commands": console_result.get("results"),
-                    "verify": None if not verify_result else verify_result.get("results"),
+                    "verify": None
+                    if not verify_result
+                    else verify_result.get("results"),
                 }
             )
 
         return step_entry(
             "configure_targets",
             STEP_CHANGED,
-            detail={"configured": [r["node_name"] for r in ctx["results"]]},
+            detail={"configured": [item["node_name"] for item in ctx["results"]]},
         )
 
     result = await run_steps(

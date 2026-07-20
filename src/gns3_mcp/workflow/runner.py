@@ -10,7 +10,6 @@ from .envelopes import (
     STATUS_PARTIAL,
     STATUS_SUCCESS,
     STEP_FAILED,
-    STEP_SUCCESS,
     step_entry,
 )
 
@@ -49,8 +48,6 @@ async def run_steps(steps: List[Step]) -> WorkflowResult:
     Status values: success | skipped | changed | failed.
     """
     recorded: List[Dict[str, Any]] = []
-    had_change = False
-    had_success = False
 
     for step in steps:
         try:
@@ -77,20 +74,13 @@ async def run_steps(steps: List[Step]) -> WorkflowResult:
             continue
 
         recorded.append(entry)
-        st = entry["status"]
-        if st == "changed":
-            had_change = True
-            had_success = True
-        elif st == "success":
-            had_success = True
-        elif st == STEP_FAILED:
-            if step.stop_on_fail:
-                return WorkflowResult(
-                    status=_rollup(recorded, forced_error=True),
-                    steps=recorded,
-                    error=entry.get("error") or f"step {step.name} failed",
-                    stopped_at=step.name,
-                )
+        if entry["status"] == STEP_FAILED and step.stop_on_fail:
+            return WorkflowResult(
+                status=_rollup(recorded, forced_error=True),
+                steps=recorded,
+                error=entry.get("error") or f"step {step.name} failed",
+                stopped_at=step.name,
+            )
 
     return WorkflowResult(status=_rollup(recorded), steps=recorded)
 
@@ -100,9 +90,12 @@ def _rollup(steps: List[Dict[str, Any]], *, forced_error: bool = False) -> str:
         return STATUS_SUCCESS
     statuses = [s.get("status") for s in steps]
     any_failed = any(s == STEP_FAILED for s in statuses)
-    any_done = any(s in (STEP_SUCCESS, "changed") for s in statuses)
+    any_changed = any(
+        s == "changed" or bool(step.get("mutated"))
+        for s, step in zip(statuses, steps)
+    )
     if forced_error or any_failed:
-        if any_done:
+        if any_changed:
             return STATUS_PARTIAL
         return STATUS_ERROR
     return STATUS_SUCCESS

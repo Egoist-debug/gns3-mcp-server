@@ -67,16 +67,54 @@ async def finish_lab_goal(
             next_hint="Confirm with user, then re-call with explicit flags (and token if needed)",
         )
 
+    steps: List[Dict[str, Any]] = []
+    client: Optional[GNS3APIClient] = None
+    project: Optional[Dict[str, Any]] = None
+    pid: Optional[str] = None
+    needs_project = stop_nodes or close_project
+
+    if needs_project:
+        config = GNS3Config.from_env(
+            server_url=url, username=username, password=password
+        )
+        ensure = await ensure_gns3_server(
+            config.server_url,
+            username=config.username,
+            password=config.password,
+        )
+        if ensure.get("status") != "success":
+            error = ensure.get("error") or "server unavailable"
+            steps.append(step_entry("ensure_server", STEP_FAILED, error=error))
+            return goal_envelope(goal, "error", steps, error=error)
+        steps.append(step_entry("ensure_server", STEP_SUCCESS))
+        client = GNS3APIClient(config)
+        try:
+            project = await resolve_project(
+                client, project_id=project_id, project_name=project_name
+            )
+        except (ResolveMissing, ResolveAmbiguous, ValueError) as exc:
+            steps.append(step_entry("resolve_project", STEP_FAILED, error=str(exc)))
+            return goal_envelope(goal, "error", steps, error=str(exc))
+        pid = project["project_id"]
+        steps.append(
+            step_entry(
+                "resolve_project",
+                STEP_SUCCESS,
+                detail={"project_id": pid, "name": project.get("name")},
+            )
+        )
+
     target = {
         "action": "finish_lab",
-        "project_id": project_id,
-        "project_name": project_name,
+        "project_id": pid,
         "stop_nodes": bool(stop_nodes),
         "close_project": bool(close_project),
         "stop_server": bool(stop_server),
         "server_url": url,
     }
     impact = {
+        "project_id": pid,
+        "project_name": None if project is None else project.get("name"),
         "stop_nodes": bool(stop_nodes),
         "close_project": bool(close_project),
         "stop_server": bool(stop_server),
@@ -87,15 +125,16 @@ async def finish_lab_goal(
 
     if not confirmation_token:
         token, expires = issue_token("finish_lab", target)
+        steps.append(
+            step_entry(
+                "authorization",
+                STEP_SUCCESS,
+                detail={"phase": "preview", "impact": impact},
+            )
+        )
         return confirmation_required_envelope(
             goal,
-            [
-                step_entry(
-                    "authorization",
-                    STEP_SUCCESS,
-                    detail={"phase": "preview", "impact": impact},
-                )
-            ],
+            steps,
             action="finish_lab",
             target=target,
             impact=impact,
@@ -103,180 +142,137 @@ async def finish_lab_goal(
             expires_at=expires,
         )
 
-    consumed = consume_token(confirmation_token, "finish_lab", target)
-    steps: List[Dict[str, Any]] = []
-    if not consumed.get("ok"):
+    if stop_server and not is_local_server_url(url):
+        error = "refusing to stop remote GNS3 server"
         steps.append(
             step_entry(
-                "authorization",
+                "stop_server",
                 STEP_FAILED,
-                error=consumed.get("error") or "token rejected",
+                error=error,
+                detail={"server_url": url},
             )
         )
-        return goal_envelope(
-            goal, "error", steps, error=consumed.get("error") or "token rejected"
-        )
+        return goal_envelope(goal, "error", steps, error=error)
+
+    nodes: List[Dict[str, Any]] = []
+    if stop_nodes:
+        assert client is not None and pid is not None
+        try:
+            nodes = await client.get_project_nodes(pid)
+        except Exception as exc:
+            error = str(exc)
+            steps.append(step_entry("stop_nodes", STEP_FAILED, error=error))
+            return goal_envelope(goal, "error", steps, error=error)
+
+    consumed = consume_token(confirmation_token, "finish_lab", target)
+    if not consumed.get("ok"):
+        error = consumed.get("error") or "token rejected"
+        steps.append(step_entry("authorization", STEP_FAILED, error=error))
+        return goal_envelope(goal, "error", steps, error=error)
     steps.append(
         step_entry("authorization", STEP_SUCCESS, detail={"phase": "consumed"})
     )
 
-    ctx: Dict[str, Any] = {"client": None, "project": None}
-
-    # Resolve project if needed
-    needs_project = stop_nodes or close_project
-    if needs_project:
-        config = GNS3Config.from_env(server_url=url, username=username, password=password)
-        ensure = await ensure_gns3_server(
-            config.server_url, username=config.username, password=config.password
+    def failed_result(
+        step: str,
+        error: str,
+        *,
+        detail: Optional[Dict[str, Any]] = None,
+        mutated: bool = False,
+    ) -> Dict[str, Any]:
+        steps.append(step_entry(step, STEP_FAILED, error=error, detail=detail))
+        had_change = mutated or any(
+            entry.get("status") == STEP_CHANGED for entry in steps
         )
-        if ensure.get("status") != "success":
-            steps.append(
-                step_entry(
-                    "ensure_server",
-                    STEP_FAILED,
-                    error=ensure.get("error") or "server unavailable",
-                )
+        return goal_envelope(
+            goal,
+            STATUS_PARTIAL if had_change else "error",
+            steps,
+            result={
+                "project_id": pid,
+                "stop_nodes": stop_nodes,
+                "close_project": close_project,
+                "stop_server": stop_server,
+                "server_url": url,
+            },
+            error=error,
+            next_hint="Fix the failed cleanup step, observe current state, and retry safely",
+        )
+
+    if stop_nodes:
+        stopped: List[Any] = []
+        failed: List[Dict[str, Any]] = []
+        for node in nodes:
+            try:
+                await client.stop_node(pid, node["node_id"])
+                stopped.append(node.get("name"))
+            except Exception as exc:
+                failed.append({"name": node.get("name"), "error": str(exc)})
+        if failed:
+            return failed_result(
+                "stop_nodes",
+                "some nodes failed to stop" if stopped else "all node stop attempts failed",
+                detail={"stopped": stopped, "failed": failed},
+                mutated=bool(stopped),
             )
-            return goal_envelope(goal, "error", steps, error=ensure.get("error"))
-        steps.append(step_entry("ensure_server", STEP_SUCCESS))
-        client = GNS3APIClient(config)
-        ctx["client"] = client
-        try:
-            project = await resolve_project(
-                client, project_id=project_id, project_name=project_name
-            )
-        except (ResolveMissing, ResolveAmbiguous, ValueError) as exc:
-            steps.append(step_entry("resolve_project", STEP_FAILED, error=str(exc)))
-            return goal_envelope(goal, "error", steps, error=str(exc))
-        ctx["project"] = project
         steps.append(
             step_entry(
-                "resolve_project",
-                STEP_SUCCESS,
-                detail={"project_id": project.get("project_id")},
+                "stop_nodes",
+                STEP_CHANGED if stopped else STEP_SUCCESS,
+                detail={"stopped": stopped},
             )
         )
-        pid = project["project_id"]
     else:
-        pid = project_id
-
-    # stop_nodes
-    if not stop_nodes:
         steps.append(
             step_entry("stop_nodes", STEP_SKIPPED, detail={"reason": "stop_nodes=false"})
         )
-    else:
-        client = ctx["client"]
-        try:
-            nodes = await client.get_project_nodes(pid)
-            stopped, failed = [], []
-            for n in nodes:
-                try:
-                    await client.stop_node(pid, n["node_id"])
-                    stopped.append(n.get("name"))
-                except Exception as exc:
-                    failed.append({"name": n.get("name"), "error": str(exc)})
-            if failed and not stopped:
-                steps.append(
-                    step_entry(
-                        "stop_nodes",
-                        STEP_FAILED,
-                        error="all node stop attempts failed",
-                        detail={"failed": failed},
-                    )
-                )
-            elif failed:
-                steps.append(
-                    step_entry(
-                        "stop_nodes",
-                        STEP_FAILED,
-                        error="some nodes failed to stop",
-                        detail={"stopped": stopped, "failed": failed},
-                    )
-                )
-            else:
-                steps.append(
-                    step_entry(
-                        "stop_nodes",
-                        STEP_CHANGED if stopped else STEP_SUCCESS,
-                        detail={"stopped": stopped},
-                    )
-                )
-        except Exception as exc:
-            steps.append(step_entry("stop_nodes", STEP_FAILED, error=str(exc)))
 
-    # close_project
-    if not close_project:
+    if close_project:
+        assert client is not None and pid is not None
+        try:
+            await client.close_project(pid)
+        except Exception as exc:
+            return failed_result("close_project", str(exc))
+        steps.append(
+            step_entry(
+                "close_project", STEP_CHANGED, detail={"project_id": pid}
+            )
+        )
+    else:
         steps.append(
             step_entry(
                 "close_project", STEP_SKIPPED, detail={"reason": "close_project=false"}
             )
         )
-    else:
-        try:
-            await ctx["client"].close_project(pid)
-            steps.append(
-                step_entry(
-                    "close_project",
-                    STEP_CHANGED,
-                    detail={"project_id": pid},
-                )
-            )
-        except Exception as exc:
-            steps.append(step_entry("close_project", STEP_FAILED, error=str(exc)))
 
-    # stop_server
-    if not stop_server:
+    if stop_server:
+        try:
+            stop_result = await stop_gns3_server(url)
+        except Exception as exc:
+            return failed_result("stop_server", str(exc))
+        if stop_result.get("status") != "success":
+            return failed_result(
+                "stop_server",
+                stop_result.get("error") or "stop failed",
+                detail=stop_result,
+            )
+        steps.append(
+            step_entry(
+                "stop_server",
+                STEP_CHANGED if stop_result.get("stopped") else STEP_SUCCESS,
+                detail=stop_result,
+            )
+        )
+    else:
         steps.append(
             step_entry(
                 "stop_server", STEP_SKIPPED, detail={"reason": "stop_server=false"}
             )
         )
-    else:
-        if not is_local_server_url(url):
-            steps.append(
-                step_entry(
-                    "stop_server",
-                    STEP_FAILED,
-                    error="refusing to stop remote GNS3 server",
-                    detail={"server_url": url},
-                )
-            )
-        else:
-            try:
-                stop_result = await stop_gns3_server(url)
-                if stop_result.get("status") == "success":
-                    steps.append(
-                        step_entry(
-                            "stop_server",
-                            STEP_CHANGED if stop_result.get("stopped") else STEP_SUCCESS,
-                            detail=stop_result,
-                        )
-                    )
-                else:
-                    steps.append(
-                        step_entry(
-                            "stop_server",
-                            STEP_FAILED,
-                            error=stop_result.get("error") or "stop failed",
-                            detail=stop_result,
-                        )
-                    )
-            except Exception as exc:
-                steps.append(step_entry("stop_server", STEP_FAILED, error=str(exc)))
-
-    any_failed = any(s.get("status") == STEP_FAILED for s in steps)
-    any_done = any(s.get("status") in (STEP_SUCCESS, STEP_CHANGED) for s in steps)
-    if any_failed and any_done:
-        status = STATUS_PARTIAL
-    elif any_failed:
-        status = "error"
-    else:
-        status = STATUS_SUCCESS
 
     return goal_envelope(
         goal,
-        status,
+        STATUS_SUCCESS,
         steps,
         result={
             "project_id": pid,
@@ -285,5 +281,4 @@ async def finish_lab_goal(
             "stop_server": stop_server,
             "server_url": url,
         },
-        error=None if status == STATUS_SUCCESS else "one or more cleanup steps failed",
     )

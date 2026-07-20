@@ -21,6 +21,7 @@ from .telnet_client import TelnetClient
 from .config_templates import ConfigTemplates, TopologyTemplates
 from .server_lifecycle import ensure_gns3_server, normalize_server_url, stop_gns3_server
 from . import ssh_client as ssh_helpers
+from .workflow.topology import validate_topology_snapshot
 
 # Keep MCP stdio clean: default WARNING unless GNS3_MCP_DEBUG is set.
 _log_level = logging.DEBUG if os.environ.get("GNS3_MCP_DEBUG") else logging.WARNING
@@ -1785,43 +1786,9 @@ async def gns3_validate_topology(
         nodes = await client.get_project_nodes(project_id)
         links = await client.get_project_links(project_id)
         
-        issues = []
-        warnings = []
-        
-        # Check for nodes without links
-        connected_nodes = set()
-        for link in links:
-            connected_nodes.add(link["nodes"][0]["node_id"])
-            connected_nodes.add(link["nodes"][1]["node_id"])
-        
-        for node in nodes:
-            if node["node_id"] not in connected_nodes:
-                warnings.append(f"Node '{node['name']}' has no connections")
-        
-        # Check for stopped critical nodes
-        for node in nodes:
-            if node.get("node_type") in ["dynamips", "iou", "qemu"] and node.get("status") != "started":
-                warnings.append(f"Critical node '{node['name']}' is not running")
-        
-        # Check for overlapping nodes
-        positions = {}
-        for node in nodes:
-            pos = (node.get("x"), node.get("y"))
-            if pos in positions:
-                issues.append(f"Nodes '{node['name']}' and '{positions[pos]}' overlap at position {pos}")
-            positions[pos] = node["name"]
-        
         return {
             "status": "success",
-            "validation": {
-                "total_nodes": len(nodes),
-                "total_links": len(links),
-                "connected_nodes": len(connected_nodes),
-                "disconnected_nodes": len(nodes) - len(connected_nodes),
-                "issues": issues,
-                "warnings": warnings,
-                "is_valid": len(issues) == 0
-            }
+            "validation": validate_topology_snapshot(nodes, links),
         }
     except Exception as e:
         logger.error(f"Failed to validate topology: {e}")

@@ -9,6 +9,7 @@ from gns3_mcp.gns3_client import GNS3APIClient, GNS3Config
 from gns3_mcp.server_lifecycle import ensure_gns3_server, normalize_server_url
 from gns3_mcp.workflow.envelopes import (
     STATUS_SUCCESS,
+    STEP_CHANGED,
     STEP_FAILED,
     STEP_SKIPPED,
     STEP_SUCCESS,
@@ -101,7 +102,7 @@ async def run_guest_commands_goal(
             )
         except (ResolveMissing, ResolveAmbiguous, ValueError) as exc:
             return step_entry("resolve_host", STEP_FAILED, error=str(exc))
-        ctx["node"] = node
+        started = False
         if node.get("status") != "started":
             try:
                 await ctx["client"].start_node(pid, node["node_id"])
@@ -111,17 +112,21 @@ async def run_guest_commands_goal(
                     STEP_FAILED,
                     error=f"failed to start node for SSH: {exc}",
                 )
-        ips = ssh_helpers.extract_ips_from_node(node if isinstance(node, dict) else {})
+            started = True
+        ips = ssh_helpers.extract_ips_from_node(
+            node if isinstance(node, dict) else {}
+        )
         if not ips:
             return step_entry(
                 "resolve_host",
                 STEP_FAILED,
                 error="Could not resolve guest IP from node metadata; pass host explicitly",
+                mutated=started,
             )
         ctx["host"] = ips[0]
         return step_entry(
             "resolve_host",
-            STEP_SUCCESS,
+            STEP_CHANGED if started else STEP_SUCCESS,
             detail={
                 "host": ctx["host"],
                 "source": "node_metadata",

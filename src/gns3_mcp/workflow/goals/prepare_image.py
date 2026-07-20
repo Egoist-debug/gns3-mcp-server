@@ -113,6 +113,39 @@ async def prepare_image_goal(
         ctx["import"] = {"action": "upload", **uploaded}
         return step_entry("import_image", STEP_CHANGED, detail=ctx["import"])
 
+    async def verify_import_step() -> Dict[str, Any]:
+        if not source_path:
+            return step_entry(
+                "verify_image",
+                STEP_SKIPPED,
+                detail={"reason": "no source_path"},
+            )
+        if (ctx.get("import") or {}).get("action") == "skip":
+            return step_entry(
+                "verify_image",
+                STEP_SKIPPED,
+                detail={"reason": "image already existed"},
+            )
+        client: GNS3APIClient = ctx["client"]
+        expected_name = remote_name or Path(source_path).name
+        observed = await find_image(
+            client,
+            compute_id=compute_id,
+            emulator=emu,
+            filename=expected_name,
+        )
+        if observed is None:
+            return step_entry(
+                "verify_image",
+                STEP_FAILED,
+                error=f"uploaded image not visible after import: {expected_name}",
+            )
+        ctx["import"]["observed"] = observed
+        return step_entry(
+            "verify_image",
+            STEP_SUCCESS,
+            detail={"filename": expected_name, "observed": observed},
+        )
     async def idle_pc_step() -> Dict[str, Any]:
         if not (idle_pc_node_id or idle_pc_node_name):
             return step_entry(
@@ -181,6 +214,7 @@ async def prepare_image_goal(
         [
             Step("ensure_server", ensure_step),
             Step("import_image", import_step),
+            Step("verify_image", verify_import_step),
             Step("idle_pc", idle_pc_step),
             Step("densify_template", densify_step),
         ]

@@ -22,12 +22,15 @@ def step_entry(
     *,
     detail: Optional[Dict[str, Any]] = None,
     error: Optional[str] = None,
+    mutated: bool = False,
 ) -> Dict[str, Any]:
     entry: Dict[str, Any] = {"step": step, "status": status}
     if detail:
         entry["detail"] = detail
     if error:
         entry["error"] = error
+    if mutated:
+        entry["mutated"] = True
     return entry
 
 
